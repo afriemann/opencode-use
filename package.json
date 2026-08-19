@@ -4,6 +4,9 @@
   "type": "module",
   "main": "src/index.js",
   "engines": { "node": ">=22.5" },
+  "devDependencies": {
+    "@opencode-ai/plugin": ">=1.15.0"
+  },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.15.0"
   }
