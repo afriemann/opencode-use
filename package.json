@@ -4,8 +4,8 @@
   "type": "module",
   "main": "src/index.js",
   "engines": { "node": ">=22.5" },
-  "devDependencies": {
-    "@opencode-ai/plugin": ">=1.15.0"
+  "scripts": {
+    "test": "node --check src/index.js && echo 'Syntax OK'"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.15.0"
