@@ -365,9 +365,13 @@ export default async function OpenCodeUse({ client, $ }) {
         if (!workdirProp) return
         workdirProp.description =
           (workdirProp.description ?? '') +
-          ' IMPORTANT: if you see "## Active Session Context (opencode-use)" in your system prompt,' +
-          ' do NOT set this parameter — the plugin automatically injects the correct working directory' +
-          ' via tool.execute.before. Setting it yourself is always wrong when that context is present.'
+          ' When "## Active Session Context (opencode-use)" is present in your system prompt,' +
+          ' the active working directory is injected into this parameter automatically by the plugin' +
+          ' before the call executes — you do not need to set it.' +
+          ' Previous bash calls in your context may show a workdir value; that was injected by the' +
+          ' plugin after you submitted the call, not set by you — write your next call without it.' +
+          ' Exception: set this explicitly if you intentionally need a different directory for this' +
+          ' one specific call — your value will be honored for that call only.'
       } catch (err) {
         log('tool.definition failed', err)
       }
@@ -397,8 +401,9 @@ export default async function OpenCodeUse({ client, $ }) {
      * Inject the active session context into the system prompt so that
      * non-bash tools (read, write, edit, glob, grep) resolve file paths correctly.
      *
-     * NOTE: the working directory is injected automatically into bash calls by the
-     * tool.execute.before hook above — models must NOT add workdir to bash calls manually.
+     * NOTE: bash calls receive workdir and env injection automatically via tool.execute.before.
+     * Models write clean bash calls; the plugin injects context silently. An explicit workdir
+     * set by the model is honored for that one call only (see !output.args.workdir guard).
      */
     'experimental.chat.system.transform': async (input, output) => {
       try {
@@ -408,22 +413,38 @@ export default async function OpenCodeUse({ client, $ }) {
         if (!state) return
 
         const lines = []
-        if (state.cwd) lines.push(`- Working directory: \`${state.cwd}\``)
-        if (state.envSource) lines.push(`- Active environment: ${state.envSource}`)
-        if (state.worktree) lines.push(`- Active worktree: \`${state.worktree.path}\``)
+        if (state.cwd) {
+          lines.push(`- **Working directory**: \`${state.cwd}\` — automatically set as \`workdir\` on every bash call`)
+        }
+        if (state.envSource) {
+          const count = Object.keys(state.env).length
+          lines.push(
+            `- **Environment** (${count} variable(s) from ${state.envSource})` +
+            ` — automatically prepended to every bash command as \`export VAR=val\``,
+          )
+        }
+        if (state.worktree) {
+          lines.push(`- **Active worktree**: \`${state.worktree.path}\``)
+        }
 
         if (lines.length > 0) {
           output.system.push(
             [
               '## Active Session Context (opencode-use)',
+              '',
+              'The following are **automatically injected into every bash call** by the plugin.',
+              'Write clean commands — do not add these yourself:',
+              '',
               ...lines,
               '',
-              'CRITICAL: Do NOT add `workdir` to bash tool calls — the plugin injects the working directory',
-              'automatically at the OS level for every bash invocation. Adding it yourself is redundant',
-              'and signals you have misread this context.',
+              'Note: bash calls in your context may show `workdir` and `export …` statements.',
+              'Those were added by the plugin after execution, not written by you.',
+              'Your next bare `bash(command="…")` call will receive the same treatment automatically.',
               '',
-              'For read, write, edit, glob, and grep tools: use the working directory path above as the',
-              'base when constructing absolute file paths for those tools.',
+              'Override: if you intentionally need a **different** directory for one specific bash call,',
+              `set \`workdir\` explicitly — your value will be used for that call only.`,
+              '',
+              'For read, write, edit, glob, grep: construct absolute paths using the working directory above.',
             ].join('\n'),
           )
         }
