@@ -33,6 +33,16 @@ function resolvePath(inputPath, ctxDirectory, stateCwd) {
 }
 
 /**
+ * Choose the best base directory for git operations.
+ * Priority: state.cwd (user's explicit choice) → ctx.worktree (session git root) → ctx.directory.
+ * This handles the common case where opencode is opened from ~ (not a git repo) but the
+ * user has called use_cwd to point at a git repo first.
+ */
+function gitRoot(state, ctx) {
+  return state.cwd ?? ctx.worktree ?? ctx.directory
+}
+
+/**
  * POSIX-safe single-quoting for injecting values into a bash -c string.
  * Wraps the value in single quotes, escaping any embedded single quotes.
  */
@@ -81,12 +91,14 @@ export default async function OpenCodeUse({ client, $ }) {
   const useCwd = tool({
     description:
       'Set the active working directory for this session. ' +
-      'All subsequent bash commands will run in this directory. ' +
-      'Non-bash tools (read, write, edit, glob, grep) also receive this path via the system prompt ' +
-      'so they resolve file paths correctly. ' +
-      'Relative paths are resolved against the project directory first, ' +
+      'The plugin automatically injects this as workdir into every bash call via tool.execute.before — ' +
+      'you do NOT need to pass workdir to bash calls yourself; doing so is redundant. ' +
+      'Non-bash tools (read, write, edit, glob, grep) receive this path in the system prompt — ' +
+      'use it as the base when constructing file paths for those tools. ' +
+      'Relative paths resolve against the project directory first, ' +
       'then the current active working directory as fallback. ' +
-      'Returns the resolved absolute path.',
+      'Path must exist and be a directory. ' +
+      'Returns: "Working directory set to: <resolved-path>".',
     args: {
       path: tool.schema.string().describe('Absolute or relative path to set as the working directory'),
     },
@@ -111,12 +123,15 @@ export default async function OpenCodeUse({ client, $ }) {
 
   const useDirenv = tool({
     description:
-      'Load environment variables from a direnv .envrc file in the given directory into the session. ' +
+      'Load environment variables from a direnv .envrc file in the given directory. ' +
       'Runs `direnv export json` to capture the environment delta. ' +
+      'Requires direnv on PATH. ' +
+      'REPLACES any previously loaded environment — calling this again overwrites the prior env entirely; it does not merge. ' +
+      'Relative paths resolve against the project directory first, then the current active working directory as fallback. ' +
       'IMPORTANT: if the .envrc is blocked (not yet allowed by direnv), ' +
-      'you MUST stop and ask the user to run `direnv allow <path>` before calling this again — ' +
+      'STOP and ask the user to run `direnv allow` in that directory before calling this again — ' +
       'do not proceed without user approval. ' +
-      'Optional changeCwd (default false): also set the active working directory to the given path. ' +
+      'Pass changeCwd=true to also set the active working directory to the given path. ' +
       'Returns a summary of loaded variable names.',
     args: {
       path: tool.schema.string().describe('Directory containing the .envrc file to load'),
@@ -183,18 +198,21 @@ export default async function OpenCodeUse({ client, $ }) {
   const useWorktree = tool({
     description:
       'Create a git worktree and set it as the active working directory for this session. ' +
-      'The branch argument is required. ' +
-      'Pass create=true to create a new branch with `git worktree add -b`; ' +
-      'otherwise the branch must already exist. ' +
-      'Fails if a worktree is already active for this session — call use_clear first. ' +
-      'Relative paths are resolved against the project directory first. ' +
-      'Sets both the active working directory and the session worktree context. ' +
-      'Returns the resolved worktree path.',
+      'Pass an existing branch name (create=false, default), or pass create=true to create a new branch with `git worktree add -b`. ' +
+      'The target path must not already exist as a directory. ' +
+      'Relative paths resolve against the project directory first, then the current active working directory as fallback. ' +
+      'Git operations run against state.cwd if set (e.g. from a prior use_cwd call), ' +
+      'falling back to the session git root and then the project directory — ' +
+      'call use_cwd with the target repo path first if opencode was opened outside a git repo. ' +
+      'STOP if a worktree is already active for this session — ' +
+      'call use_clear (fields: ["cwd", "worktree"]) to remove it first, then call use_worktree again. ' +
+      'Sets the active working directory to the new worktree path AND records it so use_clear can remove it from disk later. ' +
+      'Returns: "Worktree created at <path> on branch \'<branch>\'. Active working directory set to <path>."',
     args: {
-      path: tool.schema.string().describe('Path where the new worktree directory will be created'),
+      path: tool.schema.string().describe('Path where the new worktree directory will be created (must not already exist)'),
       branch: tool.schema
         .string()
-        .describe('Branch to check out in the worktree (must exist, unless create=true)'),
+        .describe('Branch to check out in the worktree (must exist unless create=true)'),
       create: tool.schema
         .boolean()
         .optional()
@@ -207,18 +225,18 @@ export default async function OpenCodeUse({ client, $ }) {
         if (state.worktree) {
           throw new Error(
             `A worktree is already active at ${state.worktree.path}. ` +
-            `Call use_clear (fields: ["worktree"]) to remove it before creating a new one.`,
+            `STOP — call use_clear (fields: ["cwd", "worktree"]) to remove it first, then call use_worktree again.`,
           )
         }
 
         const resolved = resolvePath(path, ctx.directory, state.cwd)
-        const gitRoot = ctx.worktree ?? ctx.directory
+        const root = gitRoot(state, ctx)
 
         try {
           if (create) {
-            await $`git worktree add -b ${branch} ${resolved}`.cwd(gitRoot).quiet()
+            await $`git worktree add -b ${branch} ${resolved}`.cwd(root).quiet()
           } else {
-            await $`git worktree add ${resolved} ${branch}`.cwd(gitRoot).quiet()
+            await $`git worktree add ${resolved} ${branch}`.cwd(root).quiet()
           }
         } catch (err) {
           throw new Error(`git worktree add failed: ${err.stderr ?? err.message}`)
@@ -244,12 +262,17 @@ export default async function OpenCodeUse({ client, $ }) {
 
   const useClear = tool({
     description:
-      'Clear session context. ' +
-      'Omit fields to clear everything (cwd, env, worktree). ' +
-      'Pass fields to clear specific parts only. ' +
-      'Clearing an owned worktree runs `git worktree remove` without --force. ' +
-      'If the worktree has uncommitted changes or untracked files, this fails loudly — ' +
-      'clean up or stash changes first, then call use_clear again.',
+      'Reset one or more fields of the active session state (cwd, env, worktree). ' +
+      'Omit fields to reset all three. Pass a subset to reset specific fields. ' +
+      'Worktrees created by use_worktree in this session are "owned" — clearing "worktree" removes them from disk ' +
+      'with `git worktree remove` (no --force). Worktrees not created by this session are unowned and are NOT removed from disk. ' +
+      'WARNING: clearing "worktree" alone does NOT reset the working directory. ' +
+      'Because use_worktree sets cwd and worktree to the same path, ' +
+      'you almost always want fields: ["cwd", "worktree"] together — ' +
+      'clearing only "worktree" leaves bash commands pointing at the now-removed directory. ' +
+      'STOP if git worktree remove fails (uncommitted changes or untracked files) — ' +
+      'clean up the worktree first, then call use_clear again. ' +
+      'Returns a newline-separated list of what was cleared, or "Nothing to clear".',
     args: {
       fields: tool.schema
         .array(tool.schema.enum(['cwd', 'env', 'worktree']))
@@ -265,9 +288,9 @@ export default async function OpenCodeUse({ client, $ }) {
         if (toClear.includes('worktree') && state.worktree) {
           if (state.worktree.owned) {
             const worktreePath = state.worktree.path
-            const gitRoot = ctx.worktree ?? ctx.directory
+            const root = gitRoot(state, ctx)
             try {
-              await $`git worktree remove ${worktreePath}`.cwd(gitRoot).quiet()
+              await $`git worktree remove ${worktreePath}`.cwd(root).quiet()
               results.push(`Removed owned worktree at ${worktreePath}`)
             } catch (err) {
               throw new Error(
@@ -276,6 +299,12 @@ export default async function OpenCodeUse({ client, $ }) {
                 `Clean up or stash changes first, then call use_clear again. ` +
                 `Git error: ${err.stderr ?? err.message}`,
               )
+            }
+            // If cwd was pointing at the removed worktree, clear it to prevent
+            // bash commands from targeting a now-removed directory.
+            if (state.cwd === worktreePath) {
+              state.cwd = null
+              results.push(`Cleared working directory (was pointing at removed worktree)`)
             }
           } else {
             results.push(
@@ -346,6 +375,9 @@ export default async function OpenCodeUse({ client, $ }) {
     /**
      * Inject the active session context into the system prompt so that
      * non-bash tools (read, write, edit, glob, grep) resolve file paths correctly.
+     *
+     * NOTE: the working directory is injected automatically into bash calls by the
+     * tool.execute.before hook above — models must NOT add workdir to bash calls manually.
      */
     'experimental.chat.system.transform': async (input, output) => {
       try {
@@ -363,8 +395,14 @@ export default async function OpenCodeUse({ client, $ }) {
           output.system.push(
             [
               '## Active Session Context (opencode-use)',
-              'Use the paths below when resolving files for read, write, edit, glob, and grep tools:',
               ...lines,
+              '',
+              'CRITICAL: Do NOT add `workdir` to bash tool calls — the plugin injects the working directory',
+              'automatically at the OS level for every bash invocation. Adding it yourself is redundant',
+              'and signals you have misread this context.',
+              '',
+              'For read, write, edit, glob, and grep tools: use the working directory path above as the',
+              'base when constructing absolute file paths for those tools.',
             ].join('\n'),
           )
         }
