@@ -352,6 +352,27 @@ export default async function OpenCodeUse({ client, $ }) {
      * Layer 2 (cwd): set output.args.workdir — the process-level working directory
      *   for the bash invocation. Only set when the agent did not pass workdir explicitly.
      */
+    /**
+     * Annotate the bash tool's `workdir` parameter schema so the model sees,
+     * at parameter-fill time, that it must not use workdir when this plugin is active.
+     * This fires at every LLM call and is more authoritative than a system-prompt hint
+     * because the model reads tool schemas while choosing parameter values.
+     */
+    'tool.definition': async ({ toolID }, output) => {
+      try {
+        if (toolID !== 'bash') return
+        const workdirProp = output.parameters?.properties?.workdir
+        if (!workdirProp) return
+        workdirProp.description =
+          (workdirProp.description ?? '') +
+          ' IMPORTANT: if you see "## Active Session Context (opencode-use)" in your system prompt,' +
+          ' do NOT set this parameter — the plugin automatically injects the correct working directory' +
+          ' via tool.execute.before. Setting it yourself is always wrong when that context is present.'
+      } catch (err) {
+        log('tool.definition failed', err)
+      }
+    },
+
     'tool.execute.before': async (input, output) => {
       try {
         if (input.tool !== 'bash') return
