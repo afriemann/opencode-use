@@ -199,17 +199,18 @@ export default async function OpenCodeUse({ client, $ }) {
     description:
       'Create a git worktree and set it as the active working directory for this session. ' +
       'Pass an existing branch name (create=false, default), or pass create=true to create a new branch with `git worktree add -b`. ' +
-      'The target path must not already exist as a directory. ' +
+      'Idempotent: if the worktree already exists on disk (registered for the given branch) or is already active ' +
+      'in this session at the same path, it is reused rather than failing. ' +
       'Relative paths resolve against the project directory first, then the current active working directory as fallback. ' +
       'Git operations run against state.cwd if set (e.g. from a prior use_cwd call), ' +
       'falling back to the session git root and then the project directory — ' +
       'call use_cwd with the target repo path first if opencode was opened outside a git repo. ' +
-      'STOP if a worktree is already active for this session — ' +
-      'call use_clear (fields: ["cwd", "worktree"]) to remove it first, then call use_worktree again. ' +
+      'STOP if a worktree is already active for this session — call use_clear (fields: ["cwd", "worktree"]) ' +
+      'to remove it first, then call use_worktree again. ' +
       'Sets the active working directory to the new worktree path AND records it so use_clear can remove it from disk later. ' +
       'Returns: "Worktree created at <path> on branch \'<branch>\'. Active working directory set to <path>."',
     args: {
-      path: tool.schema.string().describe('Path where the new worktree directory will be created (must not already exist)'),
+      path: tool.schema.string().describe('Path where the worktree directory will be created (or already exists)'),
       branch: tool.schema
         .string()
         .describe('Branch to check out in the worktree (must exist unless create=true)'),
@@ -221,15 +222,22 @@ export default async function OpenCodeUse({ client, $ }) {
     async execute({ path, branch, create = false }, ctx) {
       try {
         const state = getState(ctx.sessionID)
+        const resolved = resolvePath(path, ctx.directory, state.cwd)
 
+        // If a worktree is already tracked in session state, allow it when it's the same path.
         if (state.worktree) {
+          if (state.worktree.path === resolved) {
+            return (
+              `Worktree at ${resolved} on branch '${branch}' is already active. ` +
+              `Active working directory is ${resolved}.`
+            )
+          }
           throw new Error(
             `A worktree is already active at ${state.worktree.path}. ` +
             `STOP — call use_clear (fields: ["cwd", "worktree"]) to remove it first, then call use_worktree again.`,
           )
         }
 
-        const resolved = resolvePath(path, ctx.directory, state.cwd)
         const root = gitRoot(state, ctx)
 
         try {
@@ -239,7 +247,30 @@ export default async function OpenCodeUse({ client, $ }) {
             await $`git worktree add ${resolved} ${branch}`.cwd(root).quiet()
           }
         } catch (err) {
-          throw new Error(`git worktree add failed: ${err.stderr ?? err.message}`)
+          const errMsg = err.stderr ?? err.message ?? ''
+          // Idempotency: path already exists — check if it's a registered worktree for this branch.
+          if (errMsg.includes('already exists')) {
+            try {
+              const listOutput = await $`git worktree list --porcelain`.cwd(root).quiet().text()
+              const isRegistered = listOutput.trim().split('\n\n').some(block => {
+                const lines = block.split('\n')
+                const wtPath = lines.find(l => l.startsWith('worktree '))?.slice('worktree '.length)
+                const wtBranch = lines.find(l => l.startsWith('branch '))?.slice('branch '.length)
+                return wtPath === resolved && wtBranch === `refs/heads/${branch}`
+              })
+              if (isRegistered) {
+                state.cwd = resolved
+                state.worktree = { path: resolved, owned: false }
+                return (
+                  `Worktree at ${resolved} on branch '${branch}' already exists — reusing it. ` +
+                  `Active working directory set to ${resolved}.`
+                )
+              }
+            } catch {
+              // If list fails, fall through to the original error.
+            }
+          }
+          throw new Error(`git worktree add failed: ${errMsg}`)
         }
 
         state.cwd = resolved
