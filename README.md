@@ -1,0 +1,193 @@
+# opencode-use
+
+An [opencode](https://opencode.ai) plugin that gives agents a **persistent, per-session working context** — active directory, environment variables, and git worktrees — automatically injected into every bash call.
+
+Without this plugin, every bash tool call starts from opencode's launch directory and carries no environment, making multi-repository tasks and direnv-managed projects awkward. With it, you call `use_cwd` once and every subsequent bash call runs from that directory automatically.
+
+## Features
+
+- **`use_cwd`** — set the active working directory for the session; auto-injected into all bash calls
+- **`use_direnv`** — load a `.envrc` file via `direnv`; all exported variables prepended to every bash command
+- **`use_worktree`** — create (or reuse) a git worktree and set it as cwd in one call; idempotent
+- **`use_clear`** — tear down the session context; removes owned worktrees from disk
+- **Transparent injection** — env and cwd are injected silently via `tool.execute.before`; the agent writes clean commands and never has to repeat itself
+- **System prompt context** — non-bash tools (read, write, edit, glob, grep) see the active path injected into the system prompt so they resolve file paths correctly
+
+## Requirements
+
+- **Node.js** `>= 22.5`
+- **opencode** with `@opencode-ai/plugin >= 1.15.0`
+- **direnv** on `PATH` (only required when using `use_direnv`)
+- **git** on `PATH` (only required when using `use_worktree` / `use_clear`)
+
+## Installation
+
+### 1. Clone the repository
+
+```bash
+git clone git@github.com:afriemann/opencode-use.git ~/git/opencode-use
+```
+
+### 2. Resolve the peer dependency
+
+The plugin lives outside `~/.config/opencode/`, so Bun cannot walk up to find `@opencode-ai/plugin` there. Create a one-time symlink into the plugin's own `node_modules`:
+
+```bash
+mkdir -p ~/git/opencode-use/node_modules/@opencode-ai
+ln -s ~/.config/opencode/node_modules/@opencode-ai/plugin \
+      ~/git/opencode-use/node_modules/@opencode-ai/plugin
+```
+
+Repeat this step after a fresh opencode install or re-bootstrap.
+
+### 3. Symlink the plugin into opencode's plugins directory
+
+```bash
+ln -s ~/git/opencode-use/src/index.js \
+      ~/.config/opencode/plugins/opencode-use.js
+```
+
+opencode discovers any `.js` file in `~/.config/opencode/plugins/` automatically — no config changes are needed.
+
+### 4. Verify
+
+Start (or restart) opencode. You should see `use_cwd`, `use_direnv`, `use_worktree`, and `use_clear` listed as available tools.
+
+## Tools
+
+### `use_cwd`
+
+Set the active working directory for the session.
+
+```
+use_cwd(path: string) → "Working directory set to: <resolved-path>"
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Absolute or relative path. Relative paths resolve against the project directory first, then the current active cwd as fallback. |
+
+After this call the plugin silently sets `workdir` on every subsequent bash invocation. The agent does **not** need to pass `workdir` to bash calls — doing so is redundant (and the tool schema annotation says so).
+
+---
+
+### `use_direnv`
+
+Load environment variables from a `.envrc` file in the given directory.
+
+```
+use_direnv(path: string, changeCwd?: boolean) → "<N> variable(s) loaded: ..."
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Directory containing the `.envrc` to load. |
+| `changeCwd` | boolean | no | Also set cwd to this path. Default: `false`. |
+
+- Runs `direnv export json` and captures the environment delta.
+- **Replaces** any previously loaded env — does not merge.
+- If the `.envrc` is blocked (not yet `direnv allow`-ed), the tool fails with an actionable message asking the user to allow it.
+- All loaded variables are prepended to every bash command as `export K=V && ...`.
+
+---
+
+### `use_worktree`
+
+Create a git worktree and set it as the active working directory.
+
+```
+use_worktree(path: string, branch: string, create?: boolean)
+  → "Worktree created at <path> on branch '<branch>'. Active working directory set to <path>."
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Path where the worktree will be created (or already exists). |
+| `branch` | string | yes | Branch to check out. Must exist unless `create=true`. |
+| `create` | boolean | no | Create a new branch with `git worktree add -b`. Default: `false`. |
+
+- **Idempotent**: if the worktree already exists on disk and is registered for the given branch, it is reused without error.
+- If the same path is already active in this session, it returns a short no-op message.
+- If a *different* worktree is already active, it fails with a `use_clear` hint.
+- Worktrees created by this tool are marked **owned** — `use_clear` will remove them from disk.
+- Git operations run against `state.cwd` → `ctx.worktree` → `ctx.directory` in priority order, so calling `use_cwd` first lets this work even when opencode was opened outside a git repo.
+
+---
+
+### `use_clear`
+
+Reset one or more fields of the active session state.
+
+```
+use_clear(fields?: Array<"cwd" | "env" | "worktree">)
+  → newline-separated list of cleared items, or "Nothing to clear"
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `fields` | array | no | Which fields to reset. Omit to reset all three. |
+
+- Clearing `worktree` removes **owned** worktrees from disk with `git worktree remove` (no `--force`). If the worktree has uncommitted changes or untracked files the command fails loudly — clean up first, then call `use_clear` again.
+- Clearing `worktree` also clears `cwd` when cwd was pointing at the worktree (prevents bash commands from targeting a now-deleted directory).
+- Worktrees not created by this plugin in the current session are **unowned** — their directory is never removed.
+
+**Common pattern after finishing a feature branch:**
+
+```
+use_clear(fields: ["cwd", "worktree"])
+```
+
+## How It Works
+
+### Hook: `tool.execute.before`
+
+Fires before every bash call with two layers of injection:
+
+1. **Env layer** — if the session has loaded variables, prepends `export K=V && export K2=V2 && ...` to the command string.
+2. **Cwd layer** — if the session has an active cwd and the agent did not set `workdir` explicitly, sets `output.args.workdir = state.cwd`.
+
+The agent's command is never modified beyond the env prefix. An explicit `workdir` from the agent is always honoured for that one call only.
+
+### Hook: `tool.definition`
+
+Annotates the bash tool's `workdir` parameter description at every LLM call, telling the model it must not supply `workdir` when the plugin is active. This is more authoritative than a system-prompt note because the model reads tool schemas while choosing parameter values.
+
+### Hook: `experimental.chat.system.transform`
+
+When any session context is active, appends an `## Active Session Context (opencode-use)` block to the system prompt listing the current working directory, environment source, and active worktree. This allows non-bash tools (read, write, edit, glob, grep) to resolve file paths correctly — the model constructs absolute paths from the injected base.
+
+### Session State
+
+State is stored in a `Map` keyed by `sessionID`. Each session has:
+
+```js
+{
+  cwd: string | null,
+  env: Record<string, string>,
+  envSource: string | null,
+  worktree: { path: string, owned: boolean } | null
+}
+```
+
+State is in-process only — it does not persist across opencode restarts.
+
+## Development
+
+### Syntax check
+
+```bash
+npm test
+# node --check src/index.js && echo 'Syntax OK'
+```
+
+CI runs this against Node.js 22 and 24 on every push and pull request.
+
+### Extending the plugin
+
+The plugin exports a single async factory function `OpenCodeUse({ client, $ })`. Each tool is created with `tool()` from `@opencode-ai/plugin`. Hooks are returned as properties of the plain object the factory resolves to — matching the hook event name as the key.
+
+See the [opencode plugin API documentation](https://opencode.ai/docs/plugins) for the full hook surface and `tool()` schema API.
+
+## License
+
+MIT
