@@ -132,7 +132,8 @@ export default async function OpenCodeUse({ client, $ }) {
       'STOP and ask the user to run `direnv allow` in that directory before calling this again — ' +
       'do not proceed without user approval. ' +
       'Pass changeCwd=true to also set the active working directory to the given path. ' +
-      'Returns a summary of loaded variable names.',
+      'Returns: "Loaded N variable(s): name1, name2, …" or "direnv loaded — no environment changes exported". ' +
+      'When changeCwd=true, appends ". Working directory set to: <resolved-path>".',
     args: {
       path: tool.schema.string().describe('Directory containing the .envrc file to load'),
       changeCwd: tool.schema
@@ -199,16 +200,20 @@ export default async function OpenCodeUse({ client, $ }) {
     description:
       'Create a git worktree and set it as the active working directory for this session. ' +
       'Pass an existing branch name (create=false, default), or pass create=true to create a new branch with `git worktree add -b`. ' +
-      'Idempotent: if the worktree already exists on disk (registered for the given branch) or is already active ' +
-      'in this session at the same path, it is reused rather than failing. ' +
+      'When create=true, the default behaviour is to fetch from origin and base the new branch on the remote ' +
+      'default branch (auto-detected from the remote) instead of local HEAD. ' +
+      'Pass fromRemote=false to skip the fetch and create from local HEAD instead. ' +
+      'Pass the `base` parameter to override which remote ref to use (e.g. `base="origin/develop"`). ' +
+      'Idempotent: if the worktree at the given path is already registered for the given branch, it is reused rather than failing. ' +
+      'If the same path is already the active worktree for this session, returns a no-op message. ' +
       'Relative paths resolve against the project directory first, then the current active working directory as fallback. ' +
-      'Git operations run against state.cwd if set (e.g. from a prior use_cwd call), ' +
+      'Git operations run against the active working directory if set (via a prior use_cwd call), ' +
       'falling back to the session git root and then the project directory — ' +
       'call use_cwd with the target repo path first if opencode was opened outside a git repo. ' +
-      'STOP if a worktree is already active for this session — call use_clear (fields: ["cwd", "worktree"]) ' +
+      'STOP if a *different* worktree is already active for this session — call use_clear (fields: ["cwd", "worktree"]) ' +
       'to remove it first, then call use_worktree again. ' +
       'Sets the active working directory to the new worktree path AND records it so use_clear can remove it from disk later. ' +
-      'Returns: "Worktree created at <path> on branch \'<branch>\'. Active working directory set to <path>."',
+      'Returns: "Worktree created at <path> on branch \'<branch>\' [(from <remote-base>)]. Active working directory set to <path>."',
     args: {
       path: tool.schema.string().describe('Path where the worktree directory will be created (or already exists)'),
       branch: tool.schema
@@ -218,8 +223,24 @@ export default async function OpenCodeUse({ client, $ }) {
         .boolean()
         .optional()
         .describe('Create a new branch with -b. Default: false'),
+      fromRemote: tool.schema
+        .boolean()
+        .optional()
+        .describe(
+          'When create=true, fetch from origin first and base the new branch on the remote default branch ' +
+          '(auto-detected from the remote) instead of local HEAD. ' +
+          'Combine with the `base` parameter to target a non-default remote ref. Default: true',
+        ),
+      base: tool.schema
+        .string()
+        .optional()
+        .describe(
+          'Remote ref to base the new branch on when fromRemote=true (e.g. "origin/develop"). ' +
+          'Defaults to the remote default branch auto-detected from the remote. ' +
+          'Has no effect when fromRemote=false or create=false.',
+        ),
     },
-    async execute({ path, branch, create = false }, ctx) {
+    async execute({ path, branch, create = false, fromRemote = true, base }, ctx) {
       try {
         const state = getState(ctx.sessionID)
         const resolved = resolvePath(path, ctx.directory, state.cwd)
@@ -240,9 +261,38 @@ export default async function OpenCodeUse({ client, $ }) {
 
         const root = gitRoot(state, ctx)
 
+        // When creating from remote: detect the remote default branch (or use the caller-supplied base),
+        // then fetch origin so the ref is current before creating the worktree.
+        let remoteBase = null
+        if (create && fromRemote) {
+          if (base) {
+            remoteBase = base
+          } else {
+            try {
+              const raw = await $`git ls-remote --symref origin HEAD`.cwd(root).quiet().text()
+              const match = raw.match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)
+              if (!match) throw new Error(`Unexpected ls-remote output: ${raw.trim()}`)
+              remoteBase = `origin/${match[1]}`
+            } catch (lsErr) {
+              throw new Error(
+                `Could not detect remote default branch: ${lsErr.stderr ?? lsErr.message}`,
+              )
+            }
+          }
+          try {
+            await $`git fetch origin`.cwd(root).quiet()
+          } catch (fetchErr) {
+            throw new Error(`git fetch origin failed: ${fetchErr.stderr ?? fetchErr.message}`)
+          }
+        }
+
         try {
           if (create) {
-            await $`git worktree add -b ${branch} ${resolved}`.cwd(root).quiet()
+            if (remoteBase) {
+              await $`git worktree add -b ${branch} ${resolved} ${remoteBase}`.cwd(root).quiet()
+            } else {
+              await $`git worktree add -b ${branch} ${resolved}`.cwd(root).quiet()
+            }
           } else {
             await $`git worktree add ${resolved} ${branch}`.cwd(root).quiet()
           }
@@ -276,8 +326,9 @@ export default async function OpenCodeUse({ client, $ }) {
         state.cwd = resolved
         state.worktree = { path: resolved, owned: true }
 
+        const fromNote = remoteBase ? ` (from ${remoteBase})` : ''
         return (
-          `Worktree created at ${resolved} on branch '${branch}'. ` +
+          `Worktree created at ${resolved} on branch '${branch}'${fromNote}. ` +
           `Active working directory set to ${resolved}.`
         )
       } catch (err) {
@@ -295,6 +346,7 @@ export default async function OpenCodeUse({ client, $ }) {
     description:
       'Reset one or more fields of the active session state (cwd, env, worktree). ' +
       'Omit fields to reset all three. Pass a subset to reset specific fields. ' +
+      'Clearing "env" removes all direnv-loaded variables — they will no longer be prepended to bash commands. ' +
       'Worktrees created by use_worktree in this session are "owned" — clearing "worktree" removes them from disk ' +
       'with `git worktree remove` (no --force). Worktrees not created by this session are unowned and are NOT removed from disk. ' +
       'WARNING: clearing "worktree" alone does NOT reset the working directory. ' +
