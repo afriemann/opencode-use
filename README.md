@@ -96,8 +96,8 @@ use_direnv(path: string, changeCwd?: boolean) → "<N> variable(s) loaded: ..."
 Create a git worktree and set it as the active working directory.
 
 ```
-use_worktree(path: string, branch: string, create?: boolean)
-  → "Worktree created at <path> on branch '<branch>'. Active working directory set to <path>."
+use_worktree(path: string, branch: string, create?: boolean, fromRemote?: boolean, base?: string)
+  → "Worktree created at <path> on branch '<branch>' [(from <remote-base>)]. Active working directory set to <path>."
 ```
 
 | Parameter | Type | Required | Description |
@@ -105,12 +105,13 @@ use_worktree(path: string, branch: string, create?: boolean)
 | `path` | string | yes | Path where the worktree will be created (or already exists). |
 | `branch` | string | yes | Branch to check out. Must exist unless `create=true`. |
 | `create` | boolean | no | Create a new branch with `git worktree add -b`. Default: `false`. |
+| `fromRemote` | boolean | no | When `create=true`, fetch from origin first and base the new branch on the remote default branch (auto-detected from the remote) instead of local HEAD. Default: `true`. Pass `false` to create from local HEAD without fetching. |
+| `base` | string | no | Override which remote ref to use as the base when `fromRemote=true` (e.g. `"origin/develop"`). Defaults to the auto-detected remote default branch. Has no effect when `fromRemote=false` or `create=false`. |
 
-- **Idempotent**: if the worktree already exists on disk and is registered for the given branch, it is reused without error.
-- If the same path is already active in this session, it returns a short no-op message.
+- **Idempotent**: if the worktree at the given path is already registered for the given branch, it is reused without error. If the same path is already the active worktree for this session, returns a no-op message.
 - If a *different* worktree is already active, it fails with a `use_clear` hint.
 - Worktrees created by this tool are marked **owned** — `use_clear` will remove them from disk.
-- Git operations run against `state.cwd` → `ctx.worktree` → `ctx.directory` in priority order, so calling `use_cwd` first lets this work even when opencode was opened outside a git repo.
+- Git operations run against the active working directory (set via `use_cwd`) → `ctx.worktree` → `ctx.directory` in priority order, so calling `use_cwd` first lets this work even when opencode was opened outside a git repo.
 
 ---
 
