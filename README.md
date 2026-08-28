@@ -110,6 +110,8 @@ use_worktree(path: string, branch: string, create?: boolean, fromRemote?: boolea
 
 - **Idempotent**: if the worktree at the given path is already registered for the given branch, it is reused without error. If the same path is already the active worktree for this session, returns a no-op message.
 - If a *different* worktree is already active, it fails with a `use_clear` hint.
+- The repository root itself is rejected as the worktree path — always use a subdirectory (e.g. `.worktrees/<branch>`).
+- If the branch is already checked out at the repository root (main worktree), fails early with a clear error — switch to a different branch in the root first, then call `use_worktree` again.
 - Worktrees created by this tool are marked **owned** — `use_clear` will remove them from disk.
 - Git operations run against the active working directory (set via `use_cwd`) → `ctx.worktree` → `ctx.directory` in priority order, so calling `use_cwd` first lets this work even when opencode was opened outside a git repo.
 
@@ -120,15 +122,16 @@ use_worktree(path: string, branch: string, create?: boolean, fromRemote?: boolea
 Reset one or more fields of the active session state.
 
 ```
-use_clear(fields?: Array<"cwd" | "env" | "worktree">)
+use_clear(fields?: Array<"cwd" | "env" | "worktree">, force?: boolean)
   → newline-separated list of cleared items, or "Nothing to clear"
 ```
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `fields` | array | no | Which fields to reset. Omit to reset all three. |
+| `force` | boolean | no | Pass `--force` to `git worktree remove`, discarding uncommitted changes and untracked files. Also clears the session reference if the path is no longer a registered git worktree. Default: `false`. |
 
-- Clearing `worktree` removes **owned** worktrees from disk with `git worktree remove` (no `--force`). If the worktree has uncommitted changes or untracked files the command fails loudly — clean up first, then call `use_clear` again.
+- Clearing `worktree` removes **owned** worktrees from disk with `git worktree remove`. If the worktree has uncommitted changes or untracked files the command fails loudly — pass `force=true` to discard them, or clean up first and call `use_clear` again. If the path is no longer registered with git, `force=true` clears the session reference without attempting removal.
 - Clearing `worktree` also clears `cwd` when cwd was pointing at the worktree (prevents bash commands from targeting a now-deleted directory).
 - Worktrees not created by this plugin in the current session are **unowned** — their directory is never removed.
 
