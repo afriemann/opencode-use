@@ -109,6 +109,7 @@ use_worktree(path: string, branch: string, create?: boolean, fromRemote?: boolea
 | `base` | string | no | Override which remote ref to use as the base when `fromRemote=true` (e.g. `"origin/develop"`). Defaults to the auto-detected remote default branch. Has no effect when `fromRemote=false` or `create=false`. |
 
 - **Idempotent**: if the worktree at the given path is already registered for the given branch, it is reused without error. If the same path is already the active worktree for this session, returns a no-op message.
+- **Cross-repo contamination guard**: when reusing an existing worktree, the tool verifies the worktree actually belongs to the same repository as the current session (by inspecting which primary worktree it reports). If a prior session placed a *different* repo's worktree at the same path, an error is raised that names both repos and gives the exact `git worktree remove` command to clean up.
 - If a *different* worktree is already active, it fails with a `use_clear` hint.
 - The repository root itself is rejected as the worktree path — always use a subdirectory (e.g. `.worktrees/<branch>`).
 - If the branch is already checked out at the repository root (main worktree), fails early with a clear error — switch to a different branch in the root first, then call `use_worktree` again.
