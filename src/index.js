@@ -205,6 +205,7 @@ export default async function OpenCodeUse({ client, $ }) {
       'Pass fromRemote=false to skip the fetch and create from local HEAD instead. ' +
       'Pass the `base` parameter to override which remote ref to use (e.g. `base="origin/develop"`). ' +
       'Idempotent: if the worktree at the given path is already registered for the given branch, it is reused rather than failing. ' +
+      'Cross-repo contamination guard: when reusing an existing worktree, the tool verifies the worktree belongs to the same repository as the current session; if it does not (e.g. a prior session placed a different repo\'s worktree at the same path), an error is raised describing the mismatch and the cleanup command. ' +
       'If the same path is already the active worktree for this session, returns a no-op message. ' +
       'Relative paths resolve against the project directory first, then the current active working directory as fallback. ' +
       'Git operations run against the active working directory if set (via a prior use_cwd call), ' +
@@ -332,6 +333,7 @@ export default async function OpenCodeUse({ client, $ }) {
           const errMsg = err.stderr ?? err.message ?? ''
           // Idempotency: path already exists — check if it's a registered worktree for this branch.
           if (errMsg.includes('already exists')) {
+            let crossRepoError = null
             try {
               const listOutput = await $`git worktree list --porcelain`.cwd(root).quiet().text()
               const isRegistered = listOutput.trim().split('\n\n').some(block => {
@@ -341,16 +343,47 @@ export default async function OpenCodeUse({ client, $ }) {
                 return wtPath === resolved && wtBranch === `refs/heads/${branch}`
               })
               if (isRegistered) {
-                state.cwd = resolved
-                state.worktree = { path: resolved, owned: false }
-                return (
-                  `Worktree at ${resolved} on branch '${branch}' already exists — reusing it. ` +
-                  `Active working directory set to ${resolved}.`
-                )
+                // Guard: verify the registered worktree actually belongs to the expected repo.
+                // A prior session may have placed a worktree from a *different* repo at this path
+                // (cross-repo contamination). git worktree list from inside a linked worktree always
+                // lists the main (primary) worktree first — compare its path against the expected root.
+                try {
+                  const wtListFromInside = await $`git worktree list --porcelain`.cwd(resolved).quiet().text()
+                  const firstBlock = wtListFromInside.trim().split('\n\n')[0] ?? ''
+                  const mainWtPath = firstBlock.split('\n').find(l => l.startsWith('worktree '))?.slice('worktree '.length)
+                  if (mainWtPath && resolve(mainWtPath) !== resolve(root)) {
+                    // Capture outside the inner try so it survives the outer catch {}.
+                    crossRepoError = new Error(
+                      `Worktree at ${resolved} is registered for branch '${branch}' but belongs to a different repository.\n` +
+                      `  This session's repo:    ${resolve(root)}\n` +
+                      `  Worktree's actual repo: ${resolve(mainWtPath)}\n` +
+                      `This is cross-repo worktree contamination — a prior session likely placed this ` +
+                      `worktree in the wrong directory. ` +
+                      `Run \`git worktree remove ${resolved}\` from ${resolve(mainWtPath)} to clean it up, ` +
+                      `then call use_worktree again.`,
+                    )
+                  } else {
+                    state.cwd = resolved
+                    state.worktree = { path: resolved, owned: false }
+                    return (
+                      `Worktree at ${resolved} on branch '${branch}' already exists — reusing it. ` +
+                      `Active working directory set to ${resolved}.`
+                    )
+                  }
+                } catch {
+                  // Cannot verify repo root (git unavailable inside the worktree) — proceed optimistically.
+                  state.cwd = resolved
+                  state.worktree = { path: resolved, owned: false }
+                  return (
+                    `Worktree at ${resolved} on branch '${branch}' already exists — reusing it. ` +
+                    `Active working directory set to ${resolved}.`
+                  )
+                }
               }
             } catch {
-              // If list fails, fall through to the original error.
+              // If worktree list fails, fall through to the original error.
             }
+            if (crossRepoError) throw crossRepoError
           }
           throw new Error(`git worktree add failed: ${errMsg}`)
         }
