@@ -212,6 +212,8 @@ export default async function OpenCodeUse({ client, $ }) {
       'call use_cwd with the target repo path first if opencode was opened outside a git repo. ' +
       'STOP if a *different* worktree is already active for this session — call use_clear (fields: ["cwd", "worktree"]) ' +
       'to remove it first, then call use_worktree again. ' +
+      'Cannot use the repository root itself as the worktree path — always specify a subdirectory (e.g. .worktrees/<branch>). ' +
+      'If the branch is already checked out at the repository root, fails early with a clear error — switch to a different branch in the root first, then call use_worktree again. ' +
       'Sets the active working directory to the new worktree path AND records it so use_clear can remove it from disk later. ' +
       'Returns: "Worktree created at <path> on branch \'<branch>\' [(from <remote-base>)]. Active working directory set to <path>."',
     args: {
@@ -260,6 +262,36 @@ export default async function OpenCodeUse({ client, $ }) {
         }
 
         const root = gitRoot(state, ctx)
+
+        // Guard: reject the repo root as the worktree destination — agents must use subdirectories.
+        if (resolved === root) {
+          throw new Error(
+            `Cannot create a worktree at the repository root ('${root}'). ` +
+            `Specify a subdirectory path instead, e.g. '${root}/.worktrees/${branch}'.`,
+          )
+        }
+
+        // Pre-check: if the branch is already checked out at the repository root, fail early.
+        // Any other existing sub-worktree path is fine (idempotency handles same-path reuse;
+        // git will give its own error for genuine conflicts in other sub-worktrees).
+        try {
+          const listOutput = await $`git worktree list --porcelain`.cwd(root).quiet().text()
+          for (const block of listOutput.trim().split('\n\n')) {
+            const lines = block.split('\n')
+            const wtPath = lines.find(l => l.startsWith('worktree '))?.slice('worktree '.length)
+            const wtBranch = lines.find(l => l.startsWith('branch '))?.slice('branch '.length)
+            if (wtBranch === `refs/heads/${branch}` && wtPath === root) {
+              throw new Error(
+                `Branch '${branch}' is checked out at the repository root ('${root}'). ` +
+                `Working in the repo root is not permitted — use a worktree subdirectory. ` +
+                `Switch the repo root to a different branch first, then call use_worktree again.`,
+              )
+            }
+          }
+        } catch (checkErr) {
+          if (checkErr.message.includes('is checked out at the repository root')) throw checkErr
+          // Ignore git list failures — git worktree add will error with its own message if needed.
+        }
 
         // When creating from remote: detect the remote default branch (or use the caller-supplied base),
         // then fetch origin so the ref is current before creating the worktree.
@@ -348,21 +380,31 @@ export default async function OpenCodeUse({ client, $ }) {
       'Omit fields to reset all three. Pass a subset to reset specific fields. ' +
       'Clearing "env" removes all direnv-loaded variables — they will no longer be prepended to bash commands. ' +
       'Worktrees created by use_worktree in this session are "owned" — clearing "worktree" removes them from disk ' +
-      'with `git worktree remove` (no --force). Worktrees not created by this session are unowned and are NOT removed from disk. ' +
+      'with `git worktree remove`. Worktrees not created by this session are unowned and are NOT removed from disk. ' +
       'WARNING: clearing "worktree" alone does NOT reset the working directory. ' +
       'Because use_worktree sets cwd and worktree to the same path, ' +
       'you almost always want fields: ["cwd", "worktree"] together — ' +
       'clearing only "worktree" leaves bash commands pointing at the now-removed directory. ' +
+      'Pass force=true to run `git worktree remove --force`, discarding uncommitted changes and untracked files; ' +
+      'if the path is no longer registered with git ("not a working tree"), force=true clears the session reference without git removal. ' +
       'STOP if git worktree remove fails (uncommitted changes or untracked files) — ' +
-      'clean up the worktree first, then call use_clear again. ' +
+      'clean up first, or call use_clear with force=true. ' +
       'Returns a newline-separated list of what was cleared, or "Nothing to clear".',
     args: {
       fields: tool.schema
         .array(tool.schema.enum(['cwd', 'env', 'worktree']))
         .optional()
         .describe('Specific fields to clear. Omit to clear all (cwd, env, worktree).'),
+      force: tool.schema
+        .boolean()
+        .optional()
+        .describe(
+          'Pass --force to git worktree remove, discarding uncommitted changes and untracked files. ' +
+          'If the path is no longer registered with git ("not a working tree"), clears the session reference without attempting removal. ' +
+          'Default: false.',
+        ),
     },
-    async execute({ fields }, ctx) {
+    async execute({ fields, force = false }, ctx) {
       try {
         const state = getState(ctx.sessionID)
         const toClear = fields ?? ['cwd', 'env', 'worktree']
@@ -373,15 +415,27 @@ export default async function OpenCodeUse({ client, $ }) {
             const worktreePath = state.worktree.path
             const root = gitRoot(state, ctx)
             try {
-              await $`git worktree remove ${worktreePath}`.cwd(root).quiet()
+              await (force
+                ? $`git worktree remove --force ${worktreePath}`
+                : $`git worktree remove ${worktreePath}`
+              ).cwd(root).quiet()
               results.push(`Removed owned worktree at ${worktreePath}`)
             } catch (err) {
-              throw new Error(
-                `Failed to remove worktree at ${worktreePath}. ` +
-                `It likely has uncommitted changes or untracked files. ` +
-                `Clean up or stash changes first, then call use_clear again. ` +
-                `Git error: ${err.stderr ?? err.message}`,
-              )
+              const errMsg = err.stderr ?? err.message ?? ''
+              if (force && errMsg.includes('is not a working tree')) {
+                results.push(
+                  `Cleared worktree reference (${worktreePath}) — not a registered git worktree; directory may still exist on disk`,
+                )
+              } else {
+                throw new Error(
+                  `Failed to remove worktree at ${worktreePath}. ` +
+                  (force
+                    ? `Git error: ${errMsg}`
+                    : `It likely has uncommitted changes or untracked files. ` +
+                      `Pass force=true to discard them, or clean up and call use_clear again. ` +
+                      `Git error: ${errMsg}`),
+                )
+              }
             }
             // If cwd was pointing at the removed worktree, clear it to prevent
             // bash commands from targeting a now-removed directory.
