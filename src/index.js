@@ -409,6 +409,7 @@ export default async function OpenCodeUse({ client, $ }) {
 
   const useClear = tool({
     description:
+      'Call this only after all todos for the current task have been marked complete. ' +
       'Reset one or more fields of the active session state (cwd, env, worktree). ' +
       'Omit fields to reset all three. Pass a subset to reset specific fields. ' +
       'Clearing "env" removes all direnv-loaded variables — they will no longer be prepended to bash commands. ' +
