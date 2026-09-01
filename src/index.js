@@ -1,5 +1,5 @@
 import { tool } from '@opencode-ai/plugin'
-import { resolve, isAbsolute } from 'node:path'
+import { resolve, isAbsolute, dirname } from 'node:path'
 import { stat } from 'node:fs/promises'
 
 // ---------------------------------------------------------------------------
@@ -40,6 +40,51 @@ function resolvePath(inputPath, ctxDirectory, stateCwd) {
  */
 function gitRoot(state, ctx) {
   return state.cwd ?? ctx.worktree ?? ctx.directory
+}
+
+/**
+ * Find the nearest existing ancestor directory of `path`, walking upward past
+ * path segments that don't exist yet (e.g. an un-created `.worktrees/<branch>`
+ * destination). Returns the filesystem root if no ancestor exists.
+ */
+export async function nearestExistingDir(path) {
+  let dir = path
+  while (true) {
+    try {
+      if ((await stat(dir)).isDirectory()) return dir
+    } catch {
+      // Doesn't exist yet — keep walking up.
+    }
+    const parent = dirname(dir)
+    if (parent === dir) return dir
+    dir = parent
+  }
+}
+
+/**
+ * Resolve a validated git root for worktree operations.
+ * Tries `candidateRoot` (the session's gitRoot()) first; if that isn't
+ * actually inside a git repository, falls back to discovering one by walking
+ * up from the nearest existing ancestor of the target worktree path. Throws a
+ * clear, actionable error if neither yields a real repository, instead of
+ * letting a raw git subprocess error (e.g. "origin does not appear to be a
+ * git repository") leak through from a later command run in the wrong place.
+ */
+export async function resolveGitRoot($, candidateRoot, resolvedWorktreePath) {
+  const nearestExisting = await nearestExistingDir(dirname(resolvedWorktreePath))
+  for (const cwd of [candidateRoot, nearestExisting]) {
+    try {
+      return (await $`git rev-parse --show-toplevel`.cwd(cwd).quiet().text()).trim()
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  throw new Error(
+    `Cannot determine a git repository for this operation.\n` +
+    `  Session git root candidate: '${candidateRoot}' is not inside a git repository.\n` +
+    `  Target worktree path's nearest existing ancestor '${nearestExisting}' is not inside one either.\n` +
+    `Call use_cwd('<path-to-the-target-repo>') first, then call use_worktree again.`,
+  )
 }
 
 /**
@@ -262,7 +307,7 @@ export default async function OpenCodeUse({ client, $ }) {
           )
         }
 
-        const root = gitRoot(state, ctx)
+        const root = await resolveGitRoot($, gitRoot(state, ctx), resolved)
 
         // Guard: reject the repo root as the worktree destination — agents must use subdirectories.
         if (resolved === root) {
