@@ -1,8 +1,10 @@
 // spec: openspec/specs/workdir-injection/spec.md
-// (See also openspec/changes/fix-bash-workdir-injection-regression/ for the
-// bash-eligibility correction to this spec.)
+// (See also openspec/changes/fix-bash-workdir-injection-regression/ and
+// openspec/changes/fix-zod-schema-eligibility-detection/ for corrections to
+// this spec.)
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { z } from 'zod'
 
 import OpenCodeUse from '../src/index.js'
 import { makeTempDir } from './helpers.js'
@@ -75,7 +77,7 @@ describe('Tool Workdir Injection', () => {
 
     await plugin['tool.definition'](
       { toolID },
-      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+      { description: '', jsonSchema: { properties: { workdir: { type: 'string' } } } },
     )
 
     const output = { args: {} }
@@ -92,13 +94,58 @@ describe('Tool Workdir Injection', () => {
 
     await plugin['tool.definition'](
       { toolID },
-      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+      { description: '', jsonSchema: { properties: { workdir: { type: 'string' } } } },
     )
 
     const output = { args: { workdir: '/explicit/path' } }
     await plugin['tool.execute.before']({ tool: toolID, sessionID }, output)
 
     assert.equal(output.args.workdir, '/explicit/path')
+  })
+
+  it("Tool's workdir parameter is eligible via its JSON Schema representation", async (t) => {
+    // Proves the actual production shape works: opencode's tool.definition
+    // hook payload carries `jsonSchema` built from a real Zod schema via
+    // `z.toJSONSchema(z.object(args), { io: 'input' })` — this is exactly
+    // how openspec_cli's real `workdir` parameter is authored and reported.
+    const plugin = await makePlugin()
+    const sessionID = uniqueSessionId()
+    const cwd = await withActiveCwd(t, plugin, sessionID)
+    const toolID = uniqueToolId('real-json-schema-tool')
+
+    const zodShape = z.object({
+      command: z.string(),
+      workdir: z.string().optional().describe('Working directory for openspec'),
+    })
+    const jsonSchema = z.toJSONSchema(zodShape, { io: 'input' })
+
+    await plugin['tool.definition']({ toolID }, { description: '', jsonSchema })
+
+    const output = { args: {} }
+    await plugin['tool.execute.before']({ tool: toolID, sessionID }, output)
+
+    assert.equal(output.args.workdir, cwd)
+  })
+
+  it("Tool's workdir parameter is eligible via a raw Zod schema representation", async (t) => {
+    // Proves the legacy fallback path (opencode hosts predating 1.14.49,
+    // where `parameters` was itself a raw Zod object) still works.
+    const plugin = await makePlugin()
+    const sessionID = uniqueSessionId()
+    const cwd = await withActiveCwd(t, plugin, sessionID)
+    const toolID = uniqueToolId('real-zod-schema-tool')
+
+    const parameters = z.object({
+      command: z.string(),
+      workdir: z.string().optional().describe('Working directory for openspec'),
+    })
+
+    await plugin['tool.definition']({ toolID }, { description: '', parameters })
+
+    const output = { args: {} }
+    await plugin['tool.execute.before']({ tool: toolID, sessionID }, output)
+
+    assert.equal(output.args.workdir, cwd)
   })
 
   it("Tool's workdir parameter is enum-constrained, non-string, or required", async (t) => {
@@ -112,9 +159,9 @@ describe('Tool Workdir Injection', () => {
       { properties: { workdir: { type: 'string' } }, required: ['workdir'] },
     ]
 
-    for (const [i, parameters] of schemas.entries()) {
+    for (const [i, jsonSchema] of schemas.entries()) {
       const toolID = uniqueToolId('ineligible-tool')
-      await plugin['tool.definition']({ toolID }, { description: '', parameters })
+      await plugin['tool.definition']({ toolID }, { description: '', jsonSchema })
 
       const output = { args: {} }
       await plugin['tool.execute.before']({ tool: toolID, sessionID }, output)
@@ -138,7 +185,7 @@ describe('Tool Workdir Injection', () => {
     const noWorkdirToolID = uniqueToolId('no-workdir-tool')
     await plugin['tool.definition'](
       { toolID: noWorkdirToolID },
-      { description: '', parameters: { properties: {} } },
+      { description: '', jsonSchema: { properties: {} } },
     )
     const noWorkdir = { args: {} }
     await plugin['tool.execute.before']({ tool: noWorkdirToolID, sessionID }, noWorkdir)
@@ -153,7 +200,7 @@ describe('Tool Workdir Injection', () => {
 
     await plugin['tool.definition'](
       { toolID },
-      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+      { description: '', jsonSchema: { properties: { workdir: { type: 'string' } } } },
     )
 
     const output = {}
@@ -170,7 +217,7 @@ describe('Tool Workdir Injection', () => {
       { toolID: 'bash' },
       {
         description: '',
-        parameters: { properties: { command: { type: 'string' }, workdir: { type: 'string' } } },
+        jsonSchema: { properties: { command: { type: 'string' }, workdir: { type: 'string' } } },
       },
     )
 
@@ -197,7 +244,7 @@ describe('Tool Workdir Injection', () => {
 
     await plugin['tool.definition'](
       { toolID: 'bash' },
-      { description: '', parameters: { properties: { workdir: { type: 'number' } } } },
+      { description: '', jsonSchema: { properties: { workdir: { type: 'number' } } } },
     )
 
     const output = { args: { command: 'echo hi' } }
@@ -216,10 +263,10 @@ describe('Tool Workdir Injection', () => {
       // not the eligibility predicate — is what blocks recording and injection.
       const def = {
         description: '',
-        parameters: { properties: { workdir: { type: 'string', description: 'Original' } } },
+        jsonSchema: { properties: { workdir: { type: 'string', description: 'Original' } } },
       }
       await plugin['tool.definition']({ toolID: selfToolID }, def)
-      assert.equal(def.parameters.properties.workdir.description, 'Original', `${selfToolID} must not be annotated`)
+      assert.equal(def.jsonSchema.properties.workdir.description, 'Original', `${selfToolID} must not be annotated`)
 
       const output = { args: {} }
       await plugin['tool.execute.before']({ tool: selfToolID, sessionID }, output)
@@ -250,7 +297,7 @@ describe('Bash Environment Injection', () => {
 
     await plugin['tool.definition'](
       { toolID },
-      { description: '', parameters: { properties: { command: { type: 'string' } } } },
+      { description: '', jsonSchema: { properties: { command: { type: 'string' } } } },
     )
 
     const output = { args: { command: 'echo hi' } }
@@ -265,28 +312,50 @@ describe('Tool Workdir Schema Annotation', () => {
     const plugin = await makePlugin()
     const def = {
       description: '',
-      parameters: { properties: { workdir: { type: 'string', description: 'Original description' } } },
+      jsonSchema: { properties: { workdir: { type: 'string', description: 'Original description' } } },
     }
 
     await plugin['tool.definition']({ toolID: uniqueToolId('my-tool') }, def)
 
-    assert.ok(def.parameters.properties.workdir.description.startsWith('Original description'))
-    assert.ok(def.parameters.properties.workdir.description.includes('auto-populated by the plugin'))
+    assert.ok(def.jsonSchema.properties.workdir.description.startsWith('Original description'))
+    assert.ok(def.jsonSchema.properties.workdir.description.includes('auto-populated by the plugin'))
   })
 
   it('The same definition object is annotated twice', async () => {
     const plugin = await makePlugin()
     const def = {
       description: '',
-      parameters: { properties: { workdir: { type: 'string', description: 'Original' } } },
+      jsonSchema: { properties: { workdir: { type: 'string', description: 'Original' } } },
     }
     const toolID = uniqueToolId('my-tool')
 
     await plugin['tool.definition']({ toolID }, def)
-    const afterFirst = def.parameters.properties.workdir.description
+    const afterFirst = def.jsonSchema.properties.workdir.description
     await plugin['tool.definition']({ toolID }, def)
 
-    assert.equal(def.parameters.properties.workdir.description, afterFirst)
+    assert.equal(def.jsonSchema.properties.workdir.description, afterFirst)
+  })
+
+  it('Annotates a raw Zod schema source by reassignment, not in-place mutation', async () => {
+    // Zod schemas are immutable; in-place `.description =` throws under ESM
+    // strict mode. The annotation must replace the shape entry with a new
+    // schema instance carrying the updated description.
+    const plugin = await makePlugin()
+    const toolID = uniqueToolId('zod-annotate-tool')
+    const def = {
+      description: '',
+      parameters: z.object({ workdir: z.string().optional().describe('Original') }),
+    }
+
+    await assert.doesNotReject(plugin['tool.definition']({ toolID }, def))
+
+    const description = def.parameters.shape.workdir.description
+    assert.ok(description.startsWith('Original'))
+    assert.ok(description.includes('auto-populated by the plugin'))
+
+    // Idempotent on repeat firing against the same (now-annotated) object.
+    await plugin['tool.definition']({ toolID }, def)
+    assert.equal(def.parameters.shape.workdir.description, description)
   })
 
   it("A tool's workdir parameter is not eligible", async () => {
@@ -294,29 +363,29 @@ describe('Tool Workdir Schema Annotation', () => {
 
     const enumDef = {
       description: '',
-      parameters: { properties: { workdir: { type: 'string', enum: ['a'], description: 'Original' } } },
+      jsonSchema: { properties: { workdir: { type: 'string', enum: ['a'], description: 'Original' } } },
     }
     await plugin['tool.definition']({ toolID: uniqueToolId('enum-tool') }, enumDef)
-    assert.equal(enumDef.parameters.properties.workdir.description, 'Original')
+    assert.equal(enumDef.jsonSchema.properties.workdir.description, 'Original')
 
     const numberDef = {
       description: '',
-      parameters: { properties: { workdir: { type: 'number', description: 'Original' } } },
+      jsonSchema: { properties: { workdir: { type: 'number', description: 'Original' } } },
     }
     await plugin['tool.definition']({ toolID: uniqueToolId('number-tool') }, numberDef)
-    assert.equal(numberDef.parameters.properties.workdir.description, 'Original')
+    assert.equal(numberDef.jsonSchema.properties.workdir.description, 'Original')
 
     const requiredDef = {
       description: '',
-      parameters: {
+      jsonSchema: {
         properties: { workdir: { type: 'string', description: 'Original' } },
         required: ['workdir'],
       },
     }
     await plugin['tool.definition']({ toolID: uniqueToolId('required-tool') }, requiredDef)
-    assert.equal(requiredDef.parameters.properties.workdir.description, 'Original')
+    assert.equal(requiredDef.jsonSchema.properties.workdir.description, 'Original')
 
-    const noWorkdirDef = { description: '', parameters: { properties: {} } }
+    const noWorkdirDef = { description: '', jsonSchema: { properties: {} } }
     await assert.doesNotReject(plugin['tool.definition']({ toolID: uniqueToolId('no-workdir-tool') }, noWorkdirDef))
   })
 })
@@ -355,7 +424,7 @@ describe('Workdir Injection Diagnostics', () => {
 
     await plugin['tool.definition'](
       { toolID },
-      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+      { description: '', jsonSchema: { properties: { workdir: { type: 'string' } } } },
     )
 
     assert.ok(logs.some((m) => m.includes(`workdir-capability: ${toolID} => true`)))
@@ -367,13 +436,13 @@ describe('Workdir Injection Diagnostics', () => {
 
     await plugin['tool.definition'](
       { toolID },
-      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+      { description: '', jsonSchema: { properties: { workdir: { type: 'string' } } } },
     )
     logs.length = 0
 
     await plugin['tool.definition'](
       { toolID },
-      { description: '', parameters: { properties: { workdir: { type: 'number' } } } },
+      { description: '', jsonSchema: { properties: { workdir: { type: 'number' } } } },
     )
 
     assert.ok(logs.some((m) => m.includes(`workdir-capability: ${toolID} => false`)))
@@ -387,7 +456,7 @@ describe('Workdir Injection Diagnostics', () => {
       { toolID },
       {
         description: '',
-        parameters: {
+        jsonSchema: {
           properties: { workdir: { type: 'string' } },
           required: ['workdir'],
         },
@@ -408,13 +477,13 @@ describe('Workdir Injection Diagnostics', () => {
 
     await plugin['tool.definition'](
       { toolID },
-      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+      { description: '', jsonSchema: { properties: { workdir: { type: 'string' } } } },
     )
     logs.length = 0
 
     await plugin['tool.definition'](
       { toolID },
-      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+      { description: '', jsonSchema: { properties: { workdir: { type: 'string' } } } },
     )
 
     assert.ok(!logs.some((m) => m.includes('workdir-capability:')))
@@ -428,7 +497,7 @@ describe('Workdir Injection Diagnostics', () => {
 
     await plugin['tool.definition'](
       { toolID },
-      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+      { description: '', jsonSchema: { properties: { workdir: { type: 'string' } } } },
     )
     logs.length = 0
 
@@ -445,7 +514,7 @@ describe('Workdir Injection Diagnostics', () => {
 
     await plugin['tool.definition'](
       { toolID },
-      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+      { description: '', jsonSchema: { properties: { workdir: { type: 'string' } } } },
     )
     logs.length = 0
 

@@ -38,7 +38,15 @@ ln -s ~/.config/opencode/node_modules/@opencode-ai/plugin \
       ~/git/opencode-use/node_modules/@opencode-ai/plugin
 ```
 
-Repeat this step after a fresh opencode install or re-bootstrap.
+The test suite also needs `zod` (dev-only — the production code has no `zod`
+dependency) to build fixtures matching the real schema shapes plugin-authored
+tools present to opencode. Symlink it the same way:
+
+```bash
+ln -s ~/.config/opencode/node_modules/zod ~/git/opencode-use/node_modules/zod
+```
+
+Repeat both steps after a fresh opencode install or re-bootstrap.
 
 ### 3. Symlink the plugin into opencode's plugins directory
 

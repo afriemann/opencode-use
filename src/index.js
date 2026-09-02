@@ -52,23 +52,124 @@ const WORKDIR_ANNOTATION =
   ' one specific call — your value will be honored for that call only.'
 
 /**
- * Determine whether a tool's schema declares an eligible `workdir`
- * parameter: an optional string with no `enum` constraint. Rejecting
- * non-string, enum-constrained, or required `workdir` parameters avoids
- * producing a schema-invalid argument or a self-contradicting annotation
- * (see design.md decision #2).
+ * Determine whether a JSON-Schema-shaped `workdir` property is eligible:
+ * an optional string with no `enum` constraint. Rejecting non-string,
+ * enum-constrained, or required `workdir` properties avoids producing a
+ * schema-invalid argument or a self-contradicting annotation.
  *
- * @param {any} parameters
+ * @param {any} schema - a JSON-Schema-shaped object with `properties`/`required`
  * @returns {boolean}
  */
-function isWorkdirEligible(parameters) {
-  const prop = parameters?.properties?.workdir
+function isEligibleJsonSchemaProp(schema) {
+  const prop = schema?.properties?.workdir
   if (!prop) return false
   if (prop.type !== 'string') return false
   if ('enum' in prop) return false
-  const required = parameters?.required
+  const required = schema?.required
   if (Array.isArray(required) && required.includes('workdir')) return false
   return true
+}
+
+/** Zod v4 wrapper types treated as "not required" over their inner type. */
+const ZOD_OPTIONAL_LIKE_TYPES = new Set(['optional', 'default', 'prefault'])
+
+/**
+ * Determine whether a raw Zod `workdir` schema entry is eligible, via duck
+ * typing on Zod's internal `_zod.def` metadata rather than `import { z }
+ * from 'zod'` + `instanceof` — this needs no dependency on `zod` at all,
+ * matching how opencode itself detects Zod values. Recognizes
+ * `.optional()` / `.default()` / `.prefault()` wrappers over an inner
+ * `string` type; rejects enum, literal, number, and required fields.
+ *
+ * @param {any} prop - a raw Zod schema value (e.g. `parameters.shape.workdir`)
+ * @returns {boolean}
+ */
+function isEligibleZodProp(prop) {
+  const def = prop?._zod?.def
+  if (!def) return false
+  if (!ZOD_OPTIONAL_LIKE_TYPES.has(def.type)) return false
+  const innerType = def.innerType?._zod?.def?.type
+  return innerType === 'string'
+}
+
+/**
+ * Resolve which schema source (if any) declares a `workdir` property,
+ * consulting sources in priority order, and whether that property is
+ * workdir-eligible:
+ *   1. `output.jsonSchema` — the real, LLM-facing JSON Schema on current
+ *      opencode (also the natural shape for MCP-registered tools).
+ *   2. `output.parameters` treated as a raw Zod schema object exposing
+ *      `.shape` — the shape `parameters` took on opencode hosts predating
+ *      1.14.49.
+ *   3. `output.parameters` itself treated as JSON Schema — any other
+ *      source that presents `parameters` this way.
+ * The first source that carries a `workdir` property decides the verdict;
+ * sources are not combined. Returns `source: null` when no source carries a
+ * `workdir` property at all.
+ *
+ * @param {{ parameters?: any, jsonSchema?: any }} output
+ * @returns {{ eligible: boolean, source: 'jsonSchema'|'parameters.shape'|'parameters'|null, prop: any, required: any }}
+ */
+function resolveWorkdirEligibility(output) {
+  if (output?.jsonSchema?.properties?.workdir !== undefined) {
+    return {
+      eligible: isEligibleJsonSchemaProp(output.jsonSchema),
+      source: 'jsonSchema',
+      prop: output.jsonSchema.properties.workdir,
+      required: output.jsonSchema.required,
+    }
+  }
+  if (output?.parameters?.shape?.workdir !== undefined) {
+    return {
+      eligible: isEligibleZodProp(output.parameters.shape.workdir),
+      source: 'parameters.shape',
+      prop: output.parameters.shape.workdir,
+      required: undefined,
+    }
+  }
+  if (output?.parameters?.properties?.workdir !== undefined) {
+    return {
+      eligible: isEligibleJsonSchemaProp(output.parameters),
+      source: 'parameters',
+      prop: output.parameters.properties.workdir,
+      required: output.parameters.required,
+    }
+  }
+  return { eligible: false, source: null, prop: undefined, required: undefined }
+}
+
+/**
+ * Append the workdir-injection annotation to whichever schema source
+ * matched, writing back correctly for each source's mutability model:
+ * a JSON-Schema property's `description` is mutated in place; a raw Zod
+ * schema's `workdir` entry is replaced with a new schema instance carrying
+ * the updated description (Zod schemas are immutable — in-place mutation of
+ * a Zod schema's `description` throws under ESM strict mode and must never
+ * be attempted).
+ *
+ * @param {{ parameters?: any, jsonSchema?: any }} output
+ * @param {'jsonSchema'|'parameters'} source
+ */
+function annotateJsonSchemaProp(schema) {
+  const prop = schema.properties.workdir
+  if (prop.description?.includes(WORKDIR_ANNOTATION)) return
+  prop.description = (prop.description ?? '') + WORKDIR_ANNOTATION
+}
+
+function appendWorkdirAnnotation(output, source) {
+  if (source === 'jsonSchema') {
+    annotateJsonSchemaProp(output.jsonSchema)
+    return
+  }
+  if (source === 'parameters') {
+    annotateJsonSchemaProp(output.parameters)
+    return
+  }
+  if (source === 'parameters.shape') {
+    const prop = output.parameters.shape.workdir
+    if (prop.description?.includes(WORKDIR_ANNOTATION)) return
+    output.parameters.shape.workdir = prop.describe((prop.description ?? '') + WORKDIR_ANNOTATION)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +719,7 @@ export default async function OpenCodeUse({ client, $ }) {
     },
 
     /**
-     * Cache each tool's workdir-capability (see `isWorkdirEligible`) and, for
+     * Cache each tool's workdir-capability (see `resolveWorkdirEligibility`) and, for
      * any eligible tool, annotate its `workdir` parameter description so the
      * model sees, at parameter-fill time, that it does not need to set it.
      * This fires at every LLM call and is more authoritative than a
@@ -629,20 +730,25 @@ export default async function OpenCodeUse({ client, $ }) {
       try {
         if (SELF_TOOL_IDS.has(toolID)) return
 
-        const eligible = isWorkdirEligible(output.parameters)
+        const { eligible, source, prop, required } = resolveWorkdirEligibility(output)
         const previouslyRecorded = workdirCapable.get(toolID)
         workdirCapable.set(toolID, eligible)
         if (previouslyRecorded === undefined || previouslyRecorded !== eligible) {
-          const detail = eligible
-            ? ''
-            : ` (workdir prop: ${JSON.stringify(output.parameters?.properties?.workdir)}, required: ${JSON.stringify(output.parameters?.required)})`
+          let detail
+          if (eligible) {
+            detail = ` (via ${source})`
+          } else if (source === 'jsonSchema' || source === 'parameters') {
+            detail = ` (via ${source}; workdir prop: ${JSON.stringify(prop)}, required: ${JSON.stringify(required)})`
+          } else if (source === 'parameters.shape') {
+            detail = ` (via parameters.shape; zod type: ${prop?._zod?.def?.type}, inner: ${prop?._zod?.def?.innerType?._zod?.def?.type})`
+          } else {
+            detail = ' (no source matched)'
+          }
           log(`workdir-capability: ${toolID} => ${eligible}${detail}`)
         }
         if (!eligible) return
 
-        const workdirProp = output.parameters.properties.workdir
-        if (workdirProp.description?.includes(WORKDIR_ANNOTATION)) return
-        workdirProp.description = (workdirProp.description ?? '') + WORKDIR_ANNOTATION
+        appendWorkdirAnnotation(output, source)
       } catch (err) {
         log('tool.definition failed', err)
       }
