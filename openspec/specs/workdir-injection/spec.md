@@ -39,13 +39,22 @@ and, when the session has an active working directory (`state.cwd`), the
 call's tool is either `bash` or cached as workdir-capable, and the call did
 not already specify a `workdir` argument, set the call's `workdir` argument
 to `state.cwd`. A tool other than `bash` SHALL be considered workdir-capable
-when its schema (as reported to the `tool.definition` hook) declares a
-`workdir` parameter of type `string`, with no `enum` constraint, that is not
-listed as `required`. The `bash` tool SHALL always be treated as eligible for
+when **any** schema representation offered to the `tool.definition` hook
+declares an optional, unconstrained `workdir` string parameter. Schema
+sources SHALL be consulted in this order, using the first that carries a
+`workdir` property: (1) `output.jsonSchema` — a JSON Schema, using JSON
+Schema rules (type `string`, no `enum` constraint, not listed as `required`);
+(2) `output.parameters` treated as a raw Zod schema object (exposing a
+`.shape`), classified by the wrapped inner type being a string type not
+required (structural detection, no external library dependency); (3)
+`output.parameters` itself treated as JSON Schema, using the same JSON
+Schema rules as source (1). If no source carries a `workdir` property, or
+the property is disqualified by its source's rules, the tool is NOT
+workdir-capable. The `bash` tool SHALL always be treated as eligible for
 this injection, independent of what the `tool.definition` hook recorded for
-it, because its real, live-converted schema does not reliably match the
-eligibility predicate's assumed shape. The plugin SHALL NOT record any of its
-own tools (`use_cwd`, `use_direnv`, `use_worktree`, `use_clear`) as
+it, because its real, live-converted schema does not reliably match any of
+the three detection sources. The plugin SHALL NOT record any of its own
+tools (`use_cwd`, `use_direnv`, `use_worktree`, `use_clear`) as
 workdir-capable.
 
 #### Scenario: Session has an active working directory, an eligible tool, call omits workdir
@@ -60,15 +69,27 @@ workdir-capable.
 - WHEN a call to that tool is made with an explicit `workdir` argument
 - THEN the plugin does not overwrite the explicit value
 
+#### Scenario: Tool's workdir parameter is eligible via its JSON Schema representation
+
+- GIVEN a tool other than `bash` whose `output.jsonSchema` declares an optional, unconstrained `workdir` string parameter (the shape produced by a plugin-authored tool's Zod schema on current opencode)
+- WHEN the `tool.definition` hook observes that schema
+- THEN the plugin records the tool as workdir-capable
+
+#### Scenario: Tool's workdir parameter is eligible via a raw Zod schema representation
+
+- GIVEN a tool other than `bash` whose `output.parameters` is a raw Zod schema object declaring an optional `workdir` string parameter (the shape `output.parameters` took on hosts predating opencode 1.14.49)
+- WHEN the `tool.definition` hook observes that schema
+- THEN the plugin records the tool as workdir-capable
+
 #### Scenario: Tool's workdir parameter is enum-constrained, non-string, or required
 
-- GIVEN a tool other than `bash` whose schema declares a `workdir` parameter that has an `enum` constraint, is not of type `string`, or is listed in the schema's `required` array
+- GIVEN a tool other than `bash` whose schema (in whichever source is consulted) declares a `workdir` parameter that has an `enum` constraint, is not of type `string`, or is listed as `required`
 - WHEN the `tool.definition` hook observes that schema
 - THEN the plugin does not record the tool as workdir-capable, and no injection occurs for calls to that tool
 
 #### Scenario: Tool has no workdir parameter, or was never observed by tool.definition
 
-- GIVEN a tool other than `bash` that was never observed by the `tool.definition` hook, or whose schema has no `workdir` parameter
+- GIVEN a tool other than `bash` that was never observed by the `tool.definition` hook, or whose schema has no `workdir` parameter in any consulted source
 - WHEN a call to that tool is made
 - THEN the plugin does not modify the call's arguments
 
@@ -114,13 +135,18 @@ apply only to the `bash` tool.
 
 The plugin SHALL annotate, via the `tool.definition` hook, the description
 of any tool's `workdir` parameter that satisfies the workdir-capability
-predicate (`string`, no `enum`, not `required`), explaining that the
+predicate in any of the three detection sources, explaining that the
 parameter is auto-populated by the plugin and does not need to be set
 explicitly, and that setting it explicitly overrides the injection for that
-one call only. The annotation text SHALL NOT reference any specific tool by
-name. The plugin SHALL append the annotation at most once per definition
-object; if the parameter's description already contains the annotation, the
-plugin SHALL NOT append it again.
+one call only. The annotation SHALL be written back to whichever source
+matched: a JSON-Schema property's `description` is mutated in place; a raw
+Zod schema's `workdir` entry is replaced with a new schema instance carrying
+the updated description (Zod schemas are immutable — in-place mutation of a
+Zod schema's `description` MUST NOT be attempted). The annotation text SHALL
+NOT reference any specific tool by name. The plugin SHALL append the
+annotation at most once per definition object; if the parameter's
+description already contains the annotation, the plugin SHALL NOT append it
+again.
 
 #### Scenario: An eligible tool's schema is requested
 
@@ -148,20 +174,22 @@ generalization failures are diagnosable from opencode's normal app log
 without a special build. The `tool.definition` hook SHALL log a
 capability-recorded line only the first time a toolID is recorded, or when
 its recorded eligibility changes from a previously recorded value — not on
-every firing. When the recorded eligibility is `false`, the logged line
-SHALL additionally include the raw `workdir` property (if any) and the
-schema's `required` array, so the exact disqualifying condition is visible
-directly in the log without a further debug round-trip. The
-`tool.execute.before` hook SHALL log an injection-decision line only when the
-session has an active working directory (`state.cwd` truthy) — the only
-condition under which an injection decision is meaningful — and SHALL NOT
-log anything when there is no active working directory.
+every firing. The logged line SHALL include which schema source (`jsonSchema`,
+`parameters.shape`, or `parameters`) matched, or that none matched. When the
+recorded eligibility is `false`, the logged line SHALL additionally include
+the raw `workdir` property (if any) and the schema's `required` array, so the
+exact disqualifying condition is visible directly in the log without a
+further debug round-trip. The `tool.execute.before` hook SHALL log an
+injection-decision line only when the session has an active working
+directory (`state.cwd` truthy) — the only condition under which an injection
+decision is meaningful — and SHALL NOT log anything when there is no active
+working directory.
 
 #### Scenario: A toolID's workdir-capability is recorded for the first time
 
 - GIVEN a toolID that has never been recorded in the workdir-capability cache
 - WHEN the `tool.definition` hook fires for that toolID
-- THEN the plugin logs a line reporting the toolID and its recorded eligibility
+- THEN the plugin logs a line reporting the toolID, its recorded eligibility, and which schema source matched (or that none matched)
 
 #### Scenario: A toolID's recorded eligibility changes
 
