@@ -5,11 +5,12 @@ import { exec } from 'node:child_process'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import OpenCodeUse, {
+import OpenCodeUse from '../src/index.js'
+import {
   discoverGitRoot,
   resolveRepoContext,
   applyDirectoryChange,
-} from '../src/index.js'
+} from '../src/lib.js'
 import { makeTempDir } from './helpers.js'
 
 /** Minimal Node-based stand-in for the Bun `$` shell interface, executing real git subprocesses. */
@@ -631,23 +632,38 @@ describe('use_direnv no longer changes the session active directory', () => {
 })
 
 describe('D1 invariant guard (recommended, design.md Component Breakdown)', () => {
-  it('no state.cwd assignment exists outside applyDirectoryChange (use_clear only nulls it)', async () => {
+  it('src/index.js contains no non-null state.cwd assignment (only applyDirectoryChange in lib.js may assign it)', async () => {
     const { readFile: readFileText } = await import('node:fs/promises')
     const { fileURLToPath } = await import('node:url')
     const source = await readFileText(fileURLToPath(new URL('../src/index.js', import.meta.url)), 'utf8')
 
     const offendingLines = []
+    source.split('\n').forEach((line, i) => {
+      // Match a real assignment to state.cwd that isn't `null` and isn't `===`.
+      if (/state\.cwd\s*=\s*[^=]/.test(line) && !/state\.cwd\s*=\s*null/.test(line)) {
+        offendingLines.push(`${i + 1}: ${line.trim()}`)
+      }
+    })
+
+    assert.deepEqual(offendingLines, [], `unexpected state.cwd assignment(s) in src/index.js:\n${offendingLines.join('\n')}`)
+  })
+
+  it('src/lib.js assigns state.cwd only inside applyDirectoryChange', async () => {
+    const { readFile: readFileText } = await import('node:fs/promises')
+    const { fileURLToPath } = await import('node:url')
+    const source = await readFileText(fileURLToPath(new URL('../src/lib.js', import.meta.url)), 'utf8')
+
+    const offendingLines = []
     let currentFunction = null
     source.split('\n').forEach((line, i) => {
-      const fnMatch = line.match(/^(?:export )?(?:async )?function (\w+)/) || line.match(/^\s*const (\w+) = tool\(/)
+      const fnMatch = line.match(/^(?:export )?(?:async )?function (\w+)/)
       if (fnMatch) currentFunction = fnMatch[1]
-      // Match a real assignment to state.cwd that isn't `null` and isn't `===`.
       if (/state\.cwd\s*=\s*[^=]/.test(line) && !/state\.cwd\s*=\s*null/.test(line)) {
         const allowed = currentFunction === 'applyDirectoryChange'
         if (!allowed) offendingLines.push(`${i + 1}: ${line.trim()} (in ${currentFunction})`)
       }
     })
 
-    assert.deepEqual(offendingLines, [], `unexpected state.cwd assignment(s):\n${offendingLines.join('\n')}`)
+    assert.deepEqual(offendingLines, [], `unexpected state.cwd assignment(s) in src/lib.js:\n${offendingLines.join('\n')}`)
   })
 })
