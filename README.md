@@ -7,10 +7,10 @@ Without this plugin, every such tool call starts from opencode's launch director
 ## Features
 
 - **`use_cwd`** — set the active working directory for the session; auto-injected into every tool call that accepts a `workdir` parameter; automatically discovers and loads the target repository's `AGENTS.md` and detects an `.envrc`
-- **`use_direnv`** — load a `.envrc` file via `direnv`; all exported variables prepended to every bash command
+- **`use_direnv`** — load a `.envrc` file via `direnv`; all exported variables applied to the process environment of every shell command run for the session
 - **`use_worktree`** — create (or reuse) a git worktree and set it as cwd in one call; idempotent; same auto-discovery as `use_cwd`
 - **`use_clear`** — tear down the session context; removes owned worktrees from disk
-- **Transparent injection** — env (bash-only) and workdir (any eligible tool) are injected silently via `tool.execute.before`; a tool is eligible when its schema declares an optional, unconstrained `workdir` string parameter — the agent writes clean calls and never has to repeat itself
+- **Transparent injection** — two independent mechanisms, both silent to the agent: env (any shell opencode spawns for the session, via the native `shell.env` hook) and workdir (any eligible tool, via `tool.execute.before`; a tool is eligible when its schema declares an optional, unconstrained `workdir` string parameter) — the agent writes clean calls and never has to repeat itself
 - **System prompt context** — tools with no `workdir` parameter (read, write, edit, glob, grep) see the active path injected into the system prompt so they resolve file paths correctly
 - **Repository context auto-load** — whenever `use_cwd`/`use_worktree` moves the session to a genuinely new directory, the plugin searches upward (bounded by the git root) for an `AGENTS.md` and injects it into the system prompt as clearly-labeled advisory context, and detects (never executes) an `.envrc` to remind the agent to load it explicitly
 
@@ -103,7 +103,7 @@ use_direnv(path: string) → "<N> variable(s) loaded: ..."
 - Runs `direnv export json` and captures the environment delta.
 - **Replaces** any previously loaded env — does not merge.
 - If the `.envrc` is blocked (not yet `direnv allow`-ed), the tool fails with an actionable message asking the user to allow it.
-- All loaded variables are prepended to every bash command as `export K=V && ...`.
+- All loaded variables are applied to the process environment of every shell command run for the session (the `bash` tool, and shell parts opencode spawns from the prompt path), except `PWD`, `OLDPWD`, and any `DIRENV_*` key — see [Hook: `shell.env`](#hook-shellenv).
 - This tool only loads the environment — it never changes the session's active working directory. Call `use_cwd` separately if you also need to move there (and note that `use_cwd` already detects an `.envrc`'s presence for you and reminds you to call this tool).
 
 ---
@@ -179,12 +179,13 @@ No failure in this process (git unavailable, permission errors, an unreadable fi
 
 ### Hook: `tool.execute.before`
 
-Fires before every bash call with two layers of injection:
+Fires before every tool call whose schema was cached as workdir-capable (see [Hook: `tool.definition`](#hook-tooldefinition) below): if the session has an active cwd and the agent did not set `workdir` explicitly, sets `output.args.workdir = state.cwd`.
 
-1. **Env layer** — if the session has loaded variables, prepends `export K=V && export K2=V2 && ...` to the command string.
-2. **Cwd layer** — if the session has an active cwd and the agent did not set `workdir` explicitly, sets `output.args.workdir = state.cwd`.
+The plugin never modifies the agent's `command` string, under any circumstance. An explicit `workdir` from the agent is always honoured for that one call only.
 
-The agent's command is never modified beyond the env prefix. An explicit `workdir` from the agent is always honoured for that one call only.
+### Hook: `shell.env`
+
+Fires whenever opencode is about to spawn a shell process for a session with a known `sessionID` — the `bash` tool, and shell parts opencode spawns from its own prompt path. If the session has active environment variables loaded via `use_direnv`, they are merged into `output.env`, filtered to POSIX-portable identifier names and excluding `PWD`, `OLDPWD`, and any `DIRENV_*` key (owned by the shell itself or by direnv's own bookkeeping, and would otherwise conflict with the independently-set `workdir` or confuse a direnv-hooked child shell). opencode merges this into the real child process environment before spawning — the variables are never visible as part of the command string. Interactive terminals (pty) trigger this hook without a `sessionID` and so continue to receive no injected env. The hook never throws; any internal fault is caught, logged, and leaves the environment for that call unmodified.
 
 ### Hook: `tool.definition`
 

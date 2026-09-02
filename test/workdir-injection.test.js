@@ -275,35 +275,106 @@ describe('Tool Workdir Injection', () => {
   })
 })
 
-describe('Bash Environment Injection', () => {
+describe('Shell Environment Injection', () => {
+  /** Load env via the real use_direnv tool against the plugin's fixed direnv payload, returning the sessionID. */
+  async function withActiveEnv(t, plugin) {
+    const sessionID = uniqueSessionId()
+    const dir = await makeTempDir(t, 'shell-env-')
+    await plugin.tool.use_direnv.execute({ path: dir }, { sessionID, directory: dir })
+    return sessionID
+  }
+
   it('Session has active environment variables', async (t) => {
     const plugin = await makePlugin(fakeDirenvShell(JSON.stringify({ FOO: 'bar', BAZ: 'qux' })))
-    const sessionID = uniqueSessionId()
-    const dir = await makeTempDir(t, 'workdir-injection-env-')
-    await plugin.tool.use_direnv.execute({ path: dir }, { sessionID, directory: dir })
+    const sessionID = await withActiveEnv(t, plugin)
+
+    const output = { env: {} }
+    await plugin['shell.env']({ sessionID, cwd: '/tmp', callID: 'c1' }, output)
+
+    assert.deepEqual(output.env, { FOO: 'bar', BAZ: 'qux' })
+  })
+
+  it('Command string is never modified', async (t) => {
+    const plugin = await makePlugin(fakeDirenvShell(JSON.stringify({ FOO: 'bar' })))
+    const sessionID = await withActiveEnv(t, plugin)
 
     const output = { args: { command: 'echo hi' } }
     await plugin['tool.execute.before']({ tool: 'bash', sessionID }, output)
 
-    assert.equal(output.args.command, "export FOO='bar' && export BAZ='qux' && echo hi")
+    assert.equal(output.args.command, 'echo hi')
   })
 
-  it('A non-bash tool call is made', async (t) => {
+  it('Invocation carries no session ID', async (t) => {
     const plugin = await makePlugin(fakeDirenvShell(JSON.stringify({ FOO: 'bar' })))
-    const sessionID = uniqueSessionId()
-    const dir = await makeTempDir(t, 'workdir-injection-env-nonbash-')
-    await plugin.tool.use_direnv.execute({ path: dir }, { sessionID, directory: dir })
-    const toolID = uniqueToolId('my-tool')
+    await withActiveEnv(t, plugin)
 
-    await plugin['tool.definition'](
-      { toolID },
-      { description: '', jsonSchema: { properties: { command: { type: 'string' } } } },
+    const output = { env: {} }
+    await plugin['shell.env']({ sessionID: undefined, cwd: '/tmp', callID: 'c1' }, output)
+
+    assert.deepEqual(output.env, {})
+  })
+
+  it('Invocation carries an unknown session ID', async (t) => {
+    const plugin = await makePlugin(fakeDirenvShell(JSON.stringify({ FOO: 'bar' })))
+    await withActiveEnv(t, plugin)
+
+    const output = { env: {} }
+    await plugin['shell.env']({ sessionID: 'never-seen-session', cwd: '/tmp', callID: 'c1' }, output)
+
+    assert.deepEqual(output.env, {})
+  })
+
+  it('Malformed variable names are excluded', async (t) => {
+    const plugin = await makePlugin(
+      fakeDirenvShell(JSON.stringify({ FOO: 'good', '1BAD': 'x', 'WITH SPACE': 'y', 'HAS-DASH': 'z' })),
     )
+    const sessionID = await withActiveEnv(t, plugin)
 
-    const output = { args: { command: 'echo hi' } }
-    await plugin['tool.execute.before']({ tool: toolID, sessionID }, output)
+    const output = { env: {} }
+    await plugin['shell.env']({ sessionID, cwd: '/tmp', callID: 'c1' }, output)
 
-    assert.equal(output.args.command, 'echo hi')
+    assert.deepEqual(output.env, { FOO: 'good' })
+  })
+
+  it('Shell- and direnv-owned keys are excluded', async (t) => {
+    const plugin = await makePlugin(
+      fakeDirenvShell(
+        JSON.stringify({
+          FOO: 'good',
+          PWD: '/somewhere',
+          OLDPWD: '/elsewhere',
+          DIRENV_DIR: '-/some/dir',
+          DIRENV_WATCHES: 'x',
+          pwd: 'lowercase-passes',
+        }),
+      ),
+    )
+    const sessionID = await withActiveEnv(t, plugin)
+
+    const output = { env: {} }
+    await plugin['shell.env']({ sessionID, cwd: '/tmp', callID: 'c1' }, output)
+
+    assert.deepEqual(output.env, { FOO: 'good', pwd: 'lowercase-passes' })
+  })
+
+  it('Session has an empty environment', async (t) => {
+    const plugin = await makePlugin(fakeDirenvShell('{}'))
+    const sessionID = await withActiveEnv(t, plugin)
+
+    const output = { env: {} }
+    await assert.doesNotReject(plugin['shell.env']({ sessionID, cwd: '/tmp', callID: 'c1' }, output))
+
+    assert.deepEqual(output.env, {})
+  })
+
+  it('An internal fault never propagates', async (t) => {
+    const { plugin, logs } = await makePluginWithLogs(fakeDirenvShell(JSON.stringify({ FOO: 'bar' })))
+    const sessionID = await withActiveEnv(t, plugin)
+
+    const output = { env: Object.freeze({}) }
+    await assert.doesNotReject(plugin['shell.env']({ sessionID, cwd: '/tmp', callID: 'c1' }, output))
+
+    assert.ok(logs.some((m) => m.includes('shell.env failed')))
   })
 })
 
