@@ -633,7 +633,10 @@ export default async function OpenCodeUse({ client, $ }) {
         const previouslyRecorded = workdirCapable.get(toolID)
         workdirCapable.set(toolID, eligible)
         if (previouslyRecorded === undefined || previouslyRecorded !== eligible) {
-          log(`workdir-capability: ${toolID} => ${eligible}`)
+          const detail = eligible
+            ? ''
+            : ` (workdir prop: ${JSON.stringify(output.parameters?.properties?.workdir)}, required: ${JSON.stringify(output.parameters?.required)})`
+          log(`workdir-capability: ${toolID} => ${eligible}${detail}`)
         }
         if (!eligible) return
 
