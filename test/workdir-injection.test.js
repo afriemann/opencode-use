@@ -379,6 +379,29 @@ describe('Workdir Injection Diagnostics', () => {
     assert.ok(logs.some((m) => m.includes(`workdir-capability: ${toolID} => false`)))
   })
 
+  it('A toolID is recorded as ineligible', async () => {
+    const { plugin, logs } = await makePluginWithLogs()
+    const toolID = uniqueToolId('diag-ineligible-detail')
+
+    await plugin['tool.definition'](
+      { toolID },
+      {
+        description: '',
+        parameters: {
+          properties: { workdir: { type: 'string' } },
+          required: ['workdir'],
+        },
+      },
+    )
+
+    const line = logs.find((m) => m.includes(`workdir-capability: ${toolID} => false`))
+    assert.ok(line, 'expected an ineligible capability log line')
+    assert.ok(line.includes('workdir prop:'))
+    assert.ok(line.includes('"type":"string"'))
+    assert.ok(line.includes('required:'))
+    assert.ok(line.includes('["workdir"]'))
+  })
+
   it("A toolID's recorded eligibility is unchanged", async () => {
     const { plugin, logs } = await makePluginWithLogs()
     const toolID = uniqueToolId('diag-unchanged')
