@@ -227,6 +227,8 @@ CI runs this against Node.js 22 and 24 on every push and pull request.
 
 The plugin exports a single async factory function `OpenCodeUse({ client, $ })`. Each tool is created with `tool()` from `@opencode-ai/plugin`. Hooks are returned as properties of the plain object the factory resolves to — matching the hook event name as the key.
 
+**`src/index.js` (the file symlinked into `~/.config/opencode/plugins/`) must export nothing but `default`.** opencode's legacy-plugin loader treats *every* top-level named export of a scanned plugin file that is a function as an independent plugin factory, and invokes it as `server(input, options)` regardless of that function's real signature. A stray named export here is silently misinterpreted as its own broken "plugin" — at best a benign, always-failing no-op; at worst (if it happens to sort alphabetically before `default`) it aborts the loader before the real plugin ever registers, taking down all four tools. Internal helper functions that need direct unit-test access (`nearestExistingDir`, `resolveGitRoot`, `discoverGitRoot`, `resolveRepoContext`, `applyDirectoryChange`) live in `src/lib.js` instead, which is never symlinked into opencode's plugins directory and therefore never scanned. `test/plugin-export-surface.test.js` guards against this regressing.
+
 See the [opencode plugin API documentation](https://opencode.ai/docs/plugins) for the full hook surface and `tool()` schema API.
 
 ## License
