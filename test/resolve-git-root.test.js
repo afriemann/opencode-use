@@ -2,11 +2,11 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { exec } from 'node:child_process'
-import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import OpenCodeUse, { resolveGitRoot } from '../src/index.js'
+import { makeTempDir } from './helpers.js'
 
 /**
  * Minimal Node-based stand-in for the Bun `$` shell interface that this
@@ -56,13 +56,6 @@ function nodeShellShim(strings, ...values) {
     },
   }
   return builder
-}
-
-/** Create a fresh temp directory, registering its removal on test completion. */
-async function makeTempDir(t, prefix) {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), prefix)))
-  t.after(() => rm(dir, { recursive: true, force: true }))
-  return dir
 }
 
 /** Create a fresh temp directory and `git init` it, registering its removal on test completion. */
