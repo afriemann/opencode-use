@@ -111,26 +111,6 @@ workdir-capable.
 - WHEN a `bash` tool call is made without an explicit `workdir` argument
 - THEN the plugin still sets the call's `workdir` argument to the session's active working directory
 
-### Requirement: Bash Environment Injection
-
-The plugin SHALL intercept every `bash` tool call via the
-`tool.execute.before` hook and, when the session has a non-empty active
-environment (`state.env`), prepend an `export K=V && ...` prefix built from
-that environment to the call's `command` argument. This injection SHALL
-apply only to the `bash` tool.
-
-#### Scenario: Session has active environment variables
-
-- GIVEN a session where `use_direnv` previously loaded environment variables
-- WHEN a `bash` tool call is made
-- THEN the plugin prepends `export K=V && ...` for each active variable to the call's `command` argument
-
-#### Scenario: A non-bash tool call is made
-
-- GIVEN a session with active environment variables
-- WHEN a tool call is made to a tool other than `bash`
-- THEN the plugin does not prepend any environment export prefix to that call
-
 ### Requirement: Tool Workdir Schema Annotation
 
 The plugin SHALL annotate, via the `tool.definition` hook, the description
@@ -232,3 +212,64 @@ working directory.
 - GIVEN a session with no active working directory
 - WHEN the `tool.execute.before` hook fires for any call
 - THEN the plugin logs no injection-decision line
+
+### Requirement: Shell Environment Injection
+
+The plugin SHALL register a `shell.env` hook that populates `output.env`
+with the session's active environment (`state.env`) for every shell
+invocation opencode triggers with a known `sessionID`. This mechanism SHALL
+NOT modify the `command` argument of any tool call, under any
+circumstance.
+
+Only environment variable keys that are POSIX-portable identifiers
+(matching `[A-Za-z_][A-Za-z0-9_]*`) SHALL be injected; other keys are
+silently excluded. The keys `PWD` and `OLDPWD`, and any key starting with
+`DIRENV_`, SHALL also be excluded from injection regardless of whether
+they are POSIX-portable, since they are owned by the shell itself or by
+direnv's own bookkeeping and would otherwise conflict with the
+independently-set working directory or confuse a direnv-hooked child
+shell. Key matching SHALL be exact-case.
+
+The hook SHALL NOT throw or reject under any internal fault; any error
+SHALL be caught and logged, leaving `output.env` unmodified by the failed
+operation.
+
+#### Scenario: Session has active environment variables
+
+- **WHEN** the `shell.env` hook fires with the `sessionID` of a session where `use_direnv` previously loaded `FOO=bar` and `BAZ=qux`
+- **THEN** `output.env` contains exactly `FOO: 'bar'` and `BAZ: 'qux'`
+
+#### Scenario: Command string is never modified
+
+- **WHEN** a `bash` tool call is made for a session with active environment variables
+- **THEN** the call's `command` argument is unchanged from what the caller supplied
+
+#### Scenario: Invocation carries no session ID
+
+- **WHEN** the `shell.env` hook fires with `sessionID` undefined
+- **THEN** `output.env` is not modified
+
+#### Scenario: Invocation carries an unknown session ID
+
+- **WHEN** the `shell.env` hook fires with a `sessionID` that no tool has ever executed under
+- **THEN** `output.env` is not modified
+
+#### Scenario: Malformed variable names are excluded
+
+- **WHEN** the `shell.env` hook fires for a session whose active environment contains both a well-formed key and keys that are not POSIX-portable identifiers (e.g. starting with a digit, containing a space, containing a hyphen, or empty)
+- **THEN** only the well-formed key appears in `output.env`
+
+#### Scenario: Shell- and direnv-owned keys are excluded
+
+- **WHEN** the `shell.env` hook fires for a session whose active environment contains `PWD`, `OLDPWD`, and a `DIRENV_`-prefixed key alongside an ordinary key
+- **THEN** `output.env` contains the ordinary key only, and not `PWD`, `OLDPWD`, or the `DIRENV_`-prefixed key
+
+#### Scenario: Session has an empty environment
+
+- **WHEN** the `shell.env` hook fires for a session where `use_direnv` loaded no variables
+- **THEN** `output.env` is not modified and the hook resolves normally
+
+#### Scenario: An internal fault never propagates
+
+- **WHEN** the `shell.env` hook encounters an internal error while applying a session's active environment
+- **THEN** the hook resolves without throwing or rejecting, and the error is logged
