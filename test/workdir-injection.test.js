@@ -1,4 +1,6 @@
-// spec: openspec/changes/generalize-workdir-injection/specs/workdir-injection/spec.md
+// spec: openspec/specs/workdir-injection/spec.md
+// (See also openspec/changes/fix-bash-workdir-injection-regression/ for the
+// bash-eligibility correction to this spec.)
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -160,6 +162,32 @@ describe('Tool Workdir Injection', () => {
         description: '',
         parameters: { properties: { command: { type: 'string' }, workdir: { type: 'string' } } },
       },
+    )
+
+    const output = { args: { command: 'echo hi' } }
+    await plugin['tool.execute.before']({ tool: 'bash', sessionID }, output)
+
+    assert.equal(output.args.workdir, cwd)
+  })
+
+  it('Bash tool call injects workdir even when its live schema is not detected as eligible', async (t) => {
+    // Regression guard: bash's real, live-converted schema does not reliably
+    // match the eligibility predicate's assumed shape (see design.md
+    // decision #1 correction). bash must therefore always receive workdir
+    // injection regardless of what tool.definition recorded for it.
+    //
+    // Deliberately forces the ineligible outcome via tool.definition rather
+    // than relying on "never observed" — the workdirCapable cache is a
+    // module-level singleton shared across every test in this process, so an
+    // earlier test's tool.definition('bash', ...) call would otherwise leak
+    // a cached `true` into this test regardless of test order.
+    const plugin = await makePlugin()
+    const sessionID = uniqueSessionId()
+    const cwd = await withActiveCwd(t, plugin, sessionID)
+
+    await plugin['tool.definition'](
+      { toolID: 'bash' },
+      { description: '', parameters: { properties: { workdir: { type: 'number' } } } },
     )
 
     const output = { args: { command: 'echo hi' } }

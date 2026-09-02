@@ -664,7 +664,14 @@ export default async function OpenCodeUse({ client, $ }) {
           }
         }
 
-        if (state.cwd && !output.args.workdir && workdirCapable.get(input.tool) === true) {
+        // `bash` always qualifies, independent of the schema-detection cache:
+        // its real, live-converted schema does not reliably match the
+        // eligibility predicate's assumed shape (verified empirically after
+        // a live regression — see design.md decision #1 correction), so
+        // gating bash's own injection on `workdirCapable` silently broke it.
+        // Any other tool must still be positively confirmed eligible.
+        const eligibleForInjection = input.tool === 'bash' || workdirCapable.get(input.tool) === true
+        if (state.cwd && !output.args.workdir && eligibleForInjection) {
           output.args.workdir = state.cwd
         }
       } catch (err) {
