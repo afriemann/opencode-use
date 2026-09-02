@@ -148,11 +148,14 @@ generalization failures are diagnosable from opencode's normal app log
 without a special build. The `tool.definition` hook SHALL log a
 capability-recorded line only the first time a toolID is recorded, or when
 its recorded eligibility changes from a previously recorded value — not on
-every firing. The `tool.execute.before` hook SHALL log an injection-decision
-line only when the session has an active working directory (`state.cwd`
-truthy) — the only condition under which an injection decision is
-meaningful — and SHALL NOT log anything when there is no active working
-directory.
+every firing. When the recorded eligibility is `false`, the logged line
+SHALL additionally include the raw `workdir` property (if any) and the
+schema's `required` array, so the exact disqualifying condition is visible
+directly in the log without a further debug round-trip. The
+`tool.execute.before` hook SHALL log an injection-decision line only when the
+session has an active working directory (`state.cwd` truthy) — the only
+condition under which an injection decision is meaningful — and SHALL NOT
+log anything when there is no active working directory.
 
 #### Scenario: A toolID's workdir-capability is recorded for the first time
 
@@ -171,6 +174,12 @@ directory.
 - GIVEN a toolID previously recorded with a given eligibility value
 - WHEN the `tool.definition` hook fires again for that toolID with a schema that yields the same eligibility value
 - THEN the plugin does not log a capability-recorded line for that firing
+
+#### Scenario: A toolID is recorded as ineligible
+
+- GIVEN a tool whose schema's `workdir` property (or absence, or `required` listing) disqualifies it from workdir-capability
+- WHEN the `tool.definition` hook records that toolID as ineligible for the first time or on a change from eligible
+- THEN the plugin logs a line including the raw `workdir` property value and the schema's `required` array, in addition to the toolID and the `false` verdict
 
 #### Scenario: Injection happens
 
