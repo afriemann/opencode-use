@@ -16,6 +16,61 @@ function getState(sessionID) {
   return sessions.get(sessionID)
 }
 
+/**
+ * Cache of tool-schema workdir-capability, populated by the `tool.definition`
+ * hook and consumed by `tool.execute.before`. Keyed by bare toolID. A tool's
+ * definition is always sent to the model before the model can call it, so
+ * this cache is repopulated from the authoritative schema on every turn in
+ * which the tool is callable at all — no TTL or cross-session invalidation
+ * is needed. A missing entry is falsy and means "do not inject" (fail-closed).
+ *
+ * @type {Map<string, boolean>}
+ */
+const workdirCapable = new Map()
+
+/**
+ * The plugin's own tool IDs. Excluded from workdir-capability recording as
+ * defensive coding against ever injecting into the plugin's own tools —
+ * none currently declares a `workdir` parameter.
+ */
+const SELF_TOOL_IDS = new Set(['use_cwd', 'use_direnv', 'use_worktree', 'use_clear'])
+
+/**
+ * Appended to a workdir-capable tool's `workdir` parameter description.
+ * Also serves as its own idempotency sentinel: checked against the live
+ * description string before appending, so re-firing `tool.definition` for
+ * the same object never duplicates it. Names no specific tool so it reads
+ * correctly for any eligible tool, including `bash`.
+ */
+const WORKDIR_ANNOTATION =
+  ' When "## Active Session Context (opencode-use)" is present in your system prompt,' +
+  ' this parameter is auto-populated by the plugin before this tool call executes —' +
+  ' you do not need to set it.' +
+  ' A workdir value shown on a previous call in your context was injected by the' +
+  ' plugin after you submitted that call, not set by you — write your next call without it.' +
+  ' Exception: set this explicitly if you intentionally need a different directory for this' +
+  ' one specific call — your value will be honored for that call only.'
+
+/**
+ * Determine whether a tool's schema declares an eligible `workdir`
+ * parameter: an optional string with no `enum` constraint. Rejecting
+ * non-string, enum-constrained, or required `workdir` parameters avoids
+ * producing a schema-invalid argument or a self-contradicting annotation
+ * (see design.md decision #2).
+ *
+ * @param {any} parameters
+ * @returns {boolean}
+ */
+function isWorkdirEligible(parameters) {
+  const prop = parameters?.properties?.workdir
+  if (!prop) return false
+  if (prop.type !== 'string') return false
+  if ('enum' in prop) return false
+  const required = parameters?.required
+  if (Array.isArray(required) && required.includes('workdir')) return false
+  return true
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -136,9 +191,10 @@ export default async function OpenCodeUse({ client, $ }) {
   const useCwd = tool({
     description:
       'Set the active working directory for this session. ' +
-      'The plugin automatically injects this as workdir into every bash call via tool.execute.before — ' +
-      'you do NOT need to pass workdir to bash calls yourself; doing so is redundant. ' +
-      'Non-bash tools (read, write, edit, glob, grep) receive this path in the system prompt — ' +
+      'The plugin automatically injects this as workdir into every tool call that accepts a ' +
+      'workdir parameter (including bash) via tool.execute.before — ' +
+      'you do NOT need to pass workdir to such calls yourself; doing so is redundant. ' +
+      'Tools with no workdir parameter (read, write, edit, glob, grep) receive this path in the system prompt — ' +
       'use it as the base when constructing file paths for those tools. ' +
       'Relative paths resolve against the project directory first, ' +
       'then the current active working directory as fallback. ' +
@@ -562,64 +618,71 @@ export default async function OpenCodeUse({ client, $ }) {
     },
 
     /**
-     * Intercept every bash tool call to inject the session's active env and cwd.
-     *
-     * Layer 1 (env): prepend `export K=V && ...` to the command string.
-     * Layer 2 (cwd): set output.args.workdir — the process-level working directory
-     *   for the bash invocation. Only set when the agent did not pass workdir explicitly.
-     */
-    /**
-     * Annotate the bash tool's `workdir` parameter schema so the model sees,
-     * at parameter-fill time, that it must not use workdir when this plugin is active.
-     * This fires at every LLM call and is more authoritative than a system-prompt hint
-     * because the model reads tool schemas while choosing parameter values.
+     * Cache each tool's workdir-capability (see `isWorkdirEligible`) and, for
+     * any eligible tool, annotate its `workdir` parameter description so the
+     * model sees, at parameter-fill time, that it does not need to set it.
+     * This fires at every LLM call and is more authoritative than a
+     * system-prompt hint because the model reads tool schemas while choosing
+     * parameter values.
      */
     'tool.definition': async ({ toolID }, output) => {
       try {
-        if (toolID !== 'bash') return
-        const workdirProp = output.parameters?.properties?.workdir
-        if (!workdirProp) return
-        workdirProp.description =
-          (workdirProp.description ?? '') +
-          ' When "## Active Session Context (opencode-use)" is present in your system prompt,' +
-          ' the active working directory is injected into this parameter automatically by the plugin' +
-          ' before the call executes — you do not need to set it.' +
-          ' Previous bash calls in your context may show a workdir value; that was injected by the' +
-          ' plugin after you submitted the call, not set by you — write your next call without it.' +
-          ' Exception: set this explicitly if you intentionally need a different directory for this' +
-          ' one specific call — your value will be honored for that call only.'
+        if (SELF_TOOL_IDS.has(toolID)) return
+
+        const eligible = isWorkdirEligible(output.parameters)
+        workdirCapable.set(toolID, eligible)
+        if (!eligible) return
+
+        const workdirProp = output.parameters.properties.workdir
+        if (workdirProp.description?.includes(WORKDIR_ANNOTATION)) return
+        workdirProp.description = (workdirProp.description ?? '') + WORKDIR_ANNOTATION
       } catch (err) {
         log('tool.definition failed', err)
       }
     },
 
+    /**
+     * Intercept every tool call whose schema was cached as workdir-capable
+     * (see `tool.definition` above) to inject the session's active cwd.
+     *
+     * Layer 1 (env, `bash`-only): prepend `export K=V && ...` to the command
+     *   string — only `bash` has a shell `command` string to prepend to.
+     * Layer 2 (workdir, any eligible tool): set output.args.workdir — the
+     *   process-level working directory for the call. Only set when the
+     *   agent did not pass workdir explicitly.
+     */
     'tool.execute.before': async (input, output) => {
       try {
-        if (input.tool !== 'bash') return
+        if (!output.args) return
         const state = sessions.get(input.sessionID)
         if (!state) return
 
-        const envPrefix = buildEnvExports(state.env)
-        if (envPrefix) {
-          output.args.command = `${envPrefix} && ${output.args.command}`
+        if (input.tool === 'bash') {
+          const envPrefix = buildEnvExports(state.env)
+          if (envPrefix) {
+            output.args.command = `${envPrefix} && ${output.args.command}`
+          }
         }
 
-        if (state.cwd && !output.args.workdir) {
+        if (state.cwd && !output.args.workdir && workdirCapable.get(input.tool) === true) {
           output.args.workdir = state.cwd
         }
       } catch (err) {
-        // Never propagate — do not break the bash execution pipeline
+        // Never propagate — do not break the tool execution pipeline
         log('tool.execute.before failed', err)
       }
     },
 
     /**
      * Inject the active session context into the system prompt so that
-     * non-bash tools (read, write, edit, glob, grep) resolve file paths correctly.
+     * tools with no `workdir` parameter (read, write, edit, glob, grep)
+     * resolve file paths correctly.
      *
-     * NOTE: bash calls receive workdir and env injection automatically via tool.execute.before.
-     * Models write clean bash calls; the plugin injects context silently. An explicit workdir
-     * set by the model is honored for that one call only (see !output.args.workdir guard).
+     * NOTE: any tool cached as workdir-capable (including `bash`) receives
+     * workdir injection automatically via tool.execute.before; `bash` also
+     * receives env injection. Models write clean calls; the plugin injects
+     * context silently. An explicit workdir set by the model is honored for
+     * that one call only (see !output.args.workdir guard).
      */
     'experimental.chat.system.transform': async (input, output) => {
       try {
@@ -630,7 +693,9 @@ export default async function OpenCodeUse({ client, $ }) {
 
         const lines = []
         if (state.cwd) {
-          lines.push(`- **Working directory**: \`${state.cwd}\` — automatically set as \`workdir\` on every bash call`)
+          lines.push(
+            `- **Working directory**: \`${state.cwd}\` — automatically set as \`workdir\` on every eligible tool call`,
+          )
         }
         if (state.envSource) {
           const count = Object.keys(state.env).length
@@ -648,19 +713,19 @@ export default async function OpenCodeUse({ client, $ }) {
             [
               '## Active Session Context (opencode-use)',
               '',
-              'The following are **automatically injected into every bash call** by the plugin.',
-              'Write clean commands — do not add these yourself:',
+              'The following are **automatically injected into every tool call that accepts a `workdir` parameter**',
+              '(including `bash`) by the plugin. Write clean calls — do not add these yourself:',
               '',
               ...lines,
               '',
-              'Note: bash calls in your context may show `workdir` and `export …` statements.',
+              'Note: tool calls in your context may show a `workdir` value (and, for `bash`, `export …` statements).',
               'Those were added by the plugin after execution, not written by you.',
-              'Your next bare `bash(command="…")` call will receive the same treatment automatically.',
+              'Your next call to a tool that accepts a `workdir` parameter will receive the same treatment automatically.',
               '',
-              'Override: if you intentionally need a **different** directory for one specific bash call,',
+              'Override: if you intentionally need a **different** directory for one specific call,',
               `set \`workdir\` explicitly — your value will be used for that call only.`,
               '',
-              'For read, write, edit, glob, grep: construct absolute paths using the working directory above.',
+              'For tools with no `workdir` parameter (e.g. read, write, edit, glob, grep): construct absolute paths using the working directory above.',
             ].join('\n'),
           )
         }

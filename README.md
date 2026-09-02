@@ -1,17 +1,17 @@
 # opencode-use
 
-An [opencode](https://opencode.ai) plugin that gives agents a **persistent, per-session working context** — active directory, environment variables, and git worktrees — automatically injected into every bash call.
+An [opencode](https://opencode.ai) plugin that gives agents a **persistent, per-session working context** — active directory, environment variables, and git worktrees — automatically injected into every tool call that accepts a `workdir` parameter.
 
-Without this plugin, every bash tool call starts from opencode's launch directory and carries no environment, making multi-repository tasks and direnv-managed projects awkward. With it, you call `use_cwd` once and every subsequent bash call runs from that directory automatically.
+Without this plugin, every such tool call starts from opencode's launch directory and carries no environment, making multi-repository tasks and direnv-managed projects awkward. With it, you call `use_cwd` once and every subsequent call to a workdir-aware tool (including `bash`) runs from that directory automatically.
 
 ## Features
 
-- **`use_cwd`** — set the active working directory for the session; auto-injected into all bash calls
+- **`use_cwd`** — set the active working directory for the session; auto-injected into every tool call that accepts a `workdir` parameter
 - **`use_direnv`** — load a `.envrc` file via `direnv`; all exported variables prepended to every bash command
 - **`use_worktree`** — create (or reuse) a git worktree and set it as cwd in one call; idempotent
 - **`use_clear`** — tear down the session context; removes owned worktrees from disk
-- **Transparent injection** — env and cwd are injected silently via `tool.execute.before`; the agent writes clean commands and never has to repeat itself
-- **System prompt context** — non-bash tools (read, write, edit, glob, grep) see the active path injected into the system prompt so they resolve file paths correctly
+- **Transparent injection** — env (bash-only) and workdir (any eligible tool) are injected silently via `tool.execute.before`; a tool is eligible when its schema declares an optional, unconstrained `workdir` string parameter — the agent writes clean calls and never has to repeat itself
+- **System prompt context** — tools with no `workdir` parameter (read, write, edit, glob, grep) see the active path injected into the system prompt so they resolve file paths correctly
 
 ## Requirements
 
