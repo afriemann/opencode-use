@@ -235,22 +235,28 @@ function withNotes(primary, notes) {
   return notes.length > 0 ? [primary, ...notes].join('\n') : primary
 }
 
-/**
- * POSIX-safe single-quoting for injecting values into a bash -c string.
- * Wraps the value in single quotes, escaping any embedded single quotes.
- */
-function shellQuote(s) {
-  return "'" + String(s).replace(/'/g, "'\\''") + "'"
-}
+/** POSIX portable environment-variable name (IEEE Std 1003.1, §8.1). */
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/** Set independently by the shell / the workdir layer — never injected. */
+const ENV_KEY_DENYLIST = new Set(['PWD', 'OLDPWD'])
+
+/** direnv's own bookkeeping — confuses a direnv-hooked child shell. */
+const ENV_KEY_DENY_PREFIX = 'DIRENV_'
 
 /**
- * Build an `export K=V && ...` prefix string from the session env map.
- * Only variable names matching [A-Za-z_][A-Za-z0-9_]* are emitted.
+ * Whether an environment variable name is safe to inject into a real shell
+ * process environment: a POSIX-portable identifier that is not owned by the
+ * shell itself (`PWD`, `OLDPWD`) or by direnv's own bookkeeping (`DIRENV_*`).
+ * Matching is exact-case throughout. Values are never inspected here — this
+ * is well-formedness filtering, not shell-injection safety (there is no
+ * parsing step in a real `environ` assignment).
  */
-function buildEnvExports(env) {
-  const entries = Object.entries(env).filter(([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))
-  if (entries.length === 0) return ''
-  return entries.map(([k, v]) => `export ${k}=${shellQuote(v)}`).join(' && ')
+function isInjectableEnvKey(key) {
+  if (!ENV_NAME_PATTERN.test(key)) return false
+  if (ENV_KEY_DENYLIST.has(key)) return false
+  if (key.startsWith(ENV_KEY_DENY_PREFIX)) return false
+  return true
 }
 
 /**
@@ -612,7 +618,7 @@ export default async function OpenCodeUse({ client, $ }) {
       'Call this only after all todos for the current task have been marked complete. ' +
       'Reset one or more fields of the active session state (cwd, env, worktree). ' +
       'Omit fields to reset all three. Pass a subset to reset specific fields. ' +
-      'Clearing "env" removes all direnv-loaded variables — they will no longer be prepended to bash commands. ' +
+      'Clearing "env" removes all direnv-loaded variables — they will no longer be applied to shell commands run for this session. ' +
       'Worktrees created by use_worktree in this session are "owned" — clearing "worktree" removes them from disk ' +
       'with `git worktree remove`. Worktrees not created by this session are unowned and are NOT removed from disk. ' +
       'WARNING: clearing "worktree" alone does NOT reset the working directory. ' +
@@ -762,26 +768,17 @@ export default async function OpenCodeUse({ client, $ }) {
 
     /**
      * Intercept every tool call whose schema was cached as workdir-capable
-     * (see `tool.definition` above) to inject the session's active cwd.
-     *
-     * Layer 1 (env, `bash`-only): prepend `export K=V && ...` to the command
-     *   string — only `bash` has a shell `command` string to prepend to.
-     * Layer 2 (workdir, any eligible tool): set output.args.workdir — the
-     *   process-level working directory for the call. Only set when the
-     *   agent did not pass workdir explicitly.
+     * (see `tool.definition` above) to inject the session's active cwd as
+     * `output.args.workdir` — the process-level working directory for the
+     * call. Only set when the agent did not pass workdir explicitly. Session
+     * environment injection is a separate concern, handled by the `shell.env`
+     * hook below — this hook never modifies `output.args.command`.
      */
     'tool.execute.before': async (input, output) => {
       try {
         if (!output.args) return
         const state = sessions.get(input.sessionID)
         if (!state) return
-
-        if (input.tool === 'bash') {
-          const envPrefix = buildEnvExports(state.env)
-          if (envPrefix) {
-            output.args.command = `${envPrefix} && ${output.args.command}`
-          }
-        }
 
         // `bash` always qualifies, independent of the schema-detection cache:
         // its real, live-converted schema does not reliably match the
@@ -811,13 +808,48 @@ export default async function OpenCodeUse({ client, $ }) {
     },
 
     /**
+     * Populate the real shell process environment for every shell invocation
+     * opencode triggers with a known `sessionID` (the `bash` tool, and shell
+     * parts spawned from the prompt path) with the session's active
+     * environment (`state.env`), filtered through `isInjectableEnvKey`.
+     * Interactive pty terminals trigger this hook without a `sessionID` and
+     * so continue to receive no injected env.
+     *
+     * MUST NOT throw or reject under any circumstance: opencode invokes
+     * plugin hooks via `Effect.promise`, which treats a rejection as an
+     * unrecoverable defect rather than a recoverable error — a fault here
+     * would abort the shell spawn itself, not just this hook's own effect.
+     * Any internal error is caught, logged, and leaves `output.env`
+     * unmodified by the failed operation.
+     */
+    'shell.env': async (input, output) => {
+      try {
+        if (!input?.sessionID) return
+        const state = sessions.get(input.sessionID)
+        if (!state) return
+
+        const injectable = {}
+        for (const [key, value] of Object.entries(state.env)) {
+          if (isInjectableEnvKey(key)) injectable[key] = value
+        }
+        if (Object.keys(injectable).length === 0) return
+
+        if (!output.env || typeof output.env !== 'object') output.env = {}
+        Object.assign(output.env, injectable)
+      } catch (err) {
+        log('shell.env failed', err)
+      }
+    },
+
+    /**
      * Inject the active session context into the system prompt so that
      * tools with no `workdir` parameter (read, write, edit, glob, grep)
      * resolve file paths correctly.
      *
      * NOTE: any tool cached as workdir-capable (including `bash`) receives
-     * workdir injection automatically via tool.execute.before; `bash` also
-     * receives env injection. Models write clean calls; the plugin injects
+     * workdir injection automatically via tool.execute.before; the session's
+     * active environment reaches shell processes separately via the
+     * `shell.env` hook. Models write clean calls; the plugin injects
      * context silently. An explicit workdir set by the model is honored for
      * that one call only (see !output.args.workdir guard).
      */
@@ -838,7 +870,7 @@ export default async function OpenCodeUse({ client, $ }) {
           const count = Object.keys(state.env).length
           lines.push(
             `- **Environment** (${count} variable(s) from ${state.envSource})` +
-            ` — automatically prepended to every bash command as \`export VAR=val\``,
+            ` — applied natively to the process environment of shell commands run for this session`,
           )
         }
         if (state.worktree) {
@@ -855,8 +887,9 @@ export default async function OpenCodeUse({ client, $ }) {
               '',
               ...lines,
               '',
-              'Note: tool calls in your context may show a `workdir` value (and, for `bash`, `export …` statements).',
-              'Those were added by the plugin after execution, not written by you.',
+              'Note: tool calls in your context may show a `workdir` value — that was added by the plugin after',
+              'execution, not written by you. Session environment variables are applied to the real shell process',
+              'environment and never appear as part of a command string.',
               'Your next call to a tool that accepts a `workdir` parameter will receive the same treatment automatically.',
               '',
               'Override: if you intentionally need a **different** directory for one specific call,',
