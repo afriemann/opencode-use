@@ -49,6 +49,16 @@ async function makePlugin($ = fakeDirenvShell('{}')) {
   return OpenCodeUse({ client: { app: { log: () => Promise.resolve() } }, $ })
 }
 
+/** Create a plugin instance with a spy client, returning the plugin and the captured log messages. */
+async function makePluginWithLogs($ = fakeDirenvShell('{}')) {
+  const logs = []
+  const plugin = await OpenCodeUse({
+    client: { app: { log: ({ body }) => (logs.push(body.message), Promise.resolve()) } },
+    $,
+  })
+  return { plugin, logs }
+}
+
 /** Set state.cwd for a fresh session via the real use_cwd tool against a real temp dir. */
 async function withActiveCwd(t, plugin, sessionID) {
   const dir = await makeTempDir(t, 'workdir-injection-')
@@ -335,5 +345,120 @@ describe('System Prompt Session Context (workdir wording)', () => {
     await plugin['experimental.chat.system.transform']({ sessionID }, output)
 
     assert.equal(output.system.length, 0)
+  })
+})
+
+describe('Workdir Injection Diagnostics', () => {
+  it("A toolID's workdir-capability is recorded for the first time", async () => {
+    const { plugin, logs } = await makePluginWithLogs()
+    const toolID = uniqueToolId('diag-first-seen')
+
+    await plugin['tool.definition'](
+      { toolID },
+      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+    )
+
+    assert.ok(logs.some((m) => m.includes(`workdir-capability: ${toolID} => true`)))
+  })
+
+  it("A toolID's recorded eligibility changes", async () => {
+    const { plugin, logs } = await makePluginWithLogs()
+    const toolID = uniqueToolId('diag-changed')
+
+    await plugin['tool.definition'](
+      { toolID },
+      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+    )
+    logs.length = 0
+
+    await plugin['tool.definition'](
+      { toolID },
+      { description: '', parameters: { properties: { workdir: { type: 'number' } } } },
+    )
+
+    assert.ok(logs.some((m) => m.includes(`workdir-capability: ${toolID} => false`)))
+  })
+
+  it("A toolID's recorded eligibility is unchanged", async () => {
+    const { plugin, logs } = await makePluginWithLogs()
+    const toolID = uniqueToolId('diag-unchanged')
+
+    await plugin['tool.definition'](
+      { toolID },
+      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+    )
+    logs.length = 0
+
+    await plugin['tool.definition'](
+      { toolID },
+      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+    )
+
+    assert.ok(!logs.some((m) => m.includes('workdir-capability:')))
+  })
+
+  it('Injection happens', async (t) => {
+    const { plugin, logs } = await makePluginWithLogs()
+    const sessionID = uniqueSessionId()
+    const cwd = await withActiveCwd(t, plugin, sessionID)
+    const toolID = uniqueToolId('diag-inject')
+
+    await plugin['tool.definition'](
+      { toolID },
+      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+    )
+    logs.length = 0
+
+    await plugin['tool.execute.before']({ tool: toolID, sessionID }, { args: {} })
+
+    assert.ok(logs.some((m) => m.includes(`workdir-injection: ${toolID} => ${cwd}`)))
+  })
+
+  it('Injection is skipped because the call already has an explicit workdir', async (t) => {
+    const { plugin, logs } = await makePluginWithLogs()
+    const sessionID = uniqueSessionId()
+    await withActiveCwd(t, plugin, sessionID)
+    const toolID = uniqueToolId('diag-explicit')
+
+    await plugin['tool.definition'](
+      { toolID },
+      { description: '', parameters: { properties: { workdir: { type: 'string' } } } },
+    )
+    logs.length = 0
+
+    await plugin['tool.execute.before']({ tool: toolID, sessionID }, { args: { workdir: '/explicit' } })
+
+    assert.ok(logs.some((m) => m.includes(`workdir-injection: ${toolID} skipped (explicit workdir already set)`)))
+  })
+
+  it('Injection is skipped because the tool is not recorded as workdir-capable', async (t) => {
+    const { plugin, logs } = await makePluginWithLogs()
+    const sessionID = uniqueSessionId()
+    await withActiveCwd(t, plugin, sessionID)
+    const toolID = uniqueToolId('diag-ineligible')
+
+    logs.length = 0
+
+    await plugin['tool.execute.before']({ tool: toolID, sessionID }, { args: {} })
+
+    assert.ok(
+      logs.some((m) => m.includes(`workdir-injection: ${toolID} skipped (not recorded as workdir-capable`)),
+    )
+  })
+
+  it('No active working directory', async (t) => {
+    const { plugin, logs } = await makePluginWithLogs()
+    const sessionID = uniqueSessionId()
+    const toolID = uniqueToolId('diag-no-cwd')
+
+    // Establishes session state (via use_direnv) without ever setting cwd,
+    // so state.cwd stays falsy while a session entry exists.
+    const dir = await makeTempDir(t, 'workdir-injection-diag-no-cwd-')
+    await plugin.tool.use_direnv.execute({ path: dir }, { sessionID, directory: dir })
+    logs.length = 0
+
+    await plugin['tool.execute.before']({ tool: toolID, sessionID }, { args: {} })
+
+    assert.equal(logs.length, 0)
   })
 })

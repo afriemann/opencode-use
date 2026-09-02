@@ -630,7 +630,11 @@ export default async function OpenCodeUse({ client, $ }) {
         if (SELF_TOOL_IDS.has(toolID)) return
 
         const eligible = isWorkdirEligible(output.parameters)
+        const previouslyRecorded = workdirCapable.get(toolID)
         workdirCapable.set(toolID, eligible)
+        if (previouslyRecorded === undefined || previouslyRecorded !== eligible) {
+          log(`workdir-capability: ${toolID} => ${eligible}`)
+        }
         if (!eligible) return
 
         const workdirProp = output.parameters.properties.workdir
@@ -670,9 +674,20 @@ export default async function OpenCodeUse({ client, $ }) {
         // a live regression — see design.md decision #1 correction), so
         // gating bash's own injection on `workdirCapable` silently broke it.
         // Any other tool must still be positively confirmed eligible.
-        const eligibleForInjection = input.tool === 'bash' || workdirCapable.get(input.tool) === true
-        if (state.cwd && !output.args.workdir && eligibleForInjection) {
-          output.args.workdir = state.cwd
+        const cachedEligibility = workdirCapable.get(input.tool)
+        const eligibleForInjection = input.tool === 'bash' || cachedEligibility === true
+
+        // Diagnostic logging: only meaningful when there is an active
+        // working directory to potentially inject — silent otherwise.
+        if (state.cwd) {
+          if (output.args.workdir) {
+            log(`workdir-injection: ${input.tool} skipped (explicit workdir already set)`)
+          } else if (eligibleForInjection) {
+            output.args.workdir = state.cwd
+            log(`workdir-injection: ${input.tool} => ${state.cwd}`)
+          } else {
+            log(`workdir-injection: ${input.tool} skipped (not recorded as workdir-capable; cached=${cachedEligibility})`)
+          }
         }
       } catch (err) {
         // Never propagate — do not break the tool execution pipeline
