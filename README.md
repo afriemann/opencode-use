@@ -121,7 +121,7 @@ use_worktree(path: string, branch: string, create?: boolean, fromRemote?: boolea
 |-----------|------|----------|-------------|
 | `path` | string | yes | Path where the worktree will be created (or already exists). |
 | `branch` | string | yes | Branch to check out. Must exist unless `create=true`. |
-| `create` | boolean | no | Create a new branch with `git worktree add -b`. Default: `false`. |
+| `create` | boolean | no | Create a new branch with `git worktree add -b`. Default: `false`. If the branch already exists but isn't checked out anywhere, it's checked out into `path` instead of failing; if it's already checked out at a different worktree path, an error names that path. |
 | `fromRemote` | boolean | no | When `create=true`, fetch from origin first and base the new branch on the remote default branch (auto-detected from the remote) instead of local HEAD. Default: `true`. Pass `false` to create from local HEAD without fetching. |
 | `base` | string | no | Override which remote ref to use as the base when `fromRemote=true` (e.g. `"origin/develop"`). Defaults to the auto-detected remote default branch. Has no effect when `fromRemote=false` or `create=false`. |
 
