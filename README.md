@@ -114,7 +114,7 @@ Create a git worktree and set it as the active working directory.
 
 ```
 use_worktree(path: string, branch: string, create?: boolean, fromRemote?: boolean, base?: string)
-  → "Worktree created at <path> on branch '<branch>' [(from <remote-base>)]. Active working directory set to <path>."
+  → "Worktree created at <path> on branch '<branch>' [(from <remote-base>)]. Active working directory set to <path>. Repository root: <root>."
 ```
 
 | Parameter | Type | Required | Description |

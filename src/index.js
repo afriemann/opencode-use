@@ -420,7 +420,8 @@ export default async function OpenCodeUse({ client, $ }) {
       'searches upward (bounded by the git root) for an AGENTS.md file and injects its content into the ' +
       'system prompt as advisory, repository-provided context — and separately checks (filesystem existence ' +
       'only, no execution) for an .envrc file, appending a reminder to call use_direnv explicitly if found. ' +
-      'Returns: "Worktree created at <path> on branch \'<branch>\' [(from <remote-base>)]. Active working directory set to <path>.", plus any repository-context notes.',
+      'Returns: "Worktree created at <path> on branch \'<branch>\' [(from <remote-base>)]. Active working directory set to <path>. Repository root: <root>.", plus any repository-context notes. ' +
+      'The reported repository root is the git repository the operation actually ran against — check it against the expected repository, since a stale session context can otherwise mask a wrong-repository worktree.',
     args: {
       path: tool.schema.string().describe('Path where the worktree directory will be created (or already exists)'),
       branch: tool.schema
@@ -456,9 +457,17 @@ export default async function OpenCodeUse({ client, $ }) {
         if (state.worktree) {
           if (state.worktree.path === resolved) {
             const { notes } = await applyDirectoryChange($, state, resolved, log)
+            // git worktree list from inside a linked worktree always lists the main
+            // (primary) worktree first — see the cross-repo guard below for the same technique.
+            let repoRoot = resolved
+            try {
+              repoRoot = (await listWorktrees($, resolved))[0]?.path ?? resolved
+            } catch {
+              // Best-effort — fall back to the worktree path itself if git is unavailable.
+            }
             return withNotes(
               `Worktree at ${resolved} on branch '${branch}' is already active. ` +
-              `Active working directory is ${resolved}.`,
+              `Active working directory is ${resolved}. Repository root: ${repoRoot}.`,
               notes,
             )
           }
@@ -576,7 +585,7 @@ export default async function OpenCodeUse({ client, $ }) {
               const { notes } = await applyDirectoryChange($, state, resolved, log)
               return withNotes(
                 `Worktree created at ${resolved} on branch '${branch}' (existing branch checked out). ` +
-                `Active working directory set to ${resolved}.`,
+                `Active working directory set to ${resolved}. Repository root: ${root}.`,
                 notes,
               )
             }
@@ -613,7 +622,7 @@ export default async function OpenCodeUse({ client, $ }) {
                     const { notes } = await applyDirectoryChange($, state, resolved, log)
                     return withNotes(
                       `Worktree at ${resolved} on branch '${branch}' already exists — reusing it. ` +
-                      `Active working directory set to ${resolved}.`,
+                      `Active working directory set to ${resolved}. Repository root: ${root}.`,
                       notes,
                     )
                   }
@@ -623,7 +632,7 @@ export default async function OpenCodeUse({ client, $ }) {
                   const { notes } = await applyDirectoryChange($, state, resolved, log)
                   return withNotes(
                     `Worktree at ${resolved} on branch '${branch}' already exists — reusing it. ` +
-                    `Active working directory set to ${resolved}.`,
+                    `Active working directory set to ${resolved}. Repository root: ${root}.`,
                     notes,
                   )
                 }
@@ -642,7 +651,7 @@ export default async function OpenCodeUse({ client, $ }) {
         const fromNote = remoteBase ? ` (from ${remoteBase})` : ''
         return withNotes(
           `Worktree created at ${resolved} on branch '${branch}'${fromNote}. ` +
-          `Active working directory set to ${resolved}.`,
+          `Active working directory set to ${resolved}. Repository root: ${root}.`,
           notes,
         )
       } catch (err) {
