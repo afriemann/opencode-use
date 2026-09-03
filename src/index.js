@@ -4,6 +4,7 @@ import { stat } from 'node:fs/promises'
 import {
   nearestExistingDir,
   resolveGitRoot,
+  listWorktrees,
   discoverGitRoot,
   resolveRepoContext,
   applyDirectoryChange,
@@ -397,6 +398,8 @@ export default async function OpenCodeUse({ client, $ }) {
     description:
       'Create a git worktree and set it as the active working directory for this session. ' +
       'Pass an existing branch name (create=false, default), or pass create=true to create a new branch with `git worktree add -b`. ' +
+      'If create=true and the branch already exists but isn\'t checked out anywhere, the existing branch is checked out into `path` instead of failing; ' +
+      'if it\'s already checked out at a different worktree path, an error names that path and suggests calling use_worktree there with create=false. ' +
       'When create=true, the default behaviour is to fetch from origin and base the new branch on the remote ' +
       'default branch (auto-detected from the remote) instead of local HEAD. ' +
       'Pass fromRemote=false to skip the fetch and create from local HEAD instead. ' +
@@ -479,18 +482,16 @@ export default async function OpenCodeUse({ client, $ }) {
         // Any other existing sub-worktree path is fine (idempotency handles same-path reuse;
         // git will give its own error for genuine conflicts in other sub-worktrees).
         try {
-          const listOutput = await $`git worktree list --porcelain`.cwd(root).quiet().text()
-          for (const block of listOutput.trim().split('\n\n')) {
-            const lines = block.split('\n')
-            const wtPath = lines.find(l => l.startsWith('worktree '))?.slice('worktree '.length)
-            const wtBranch = lines.find(l => l.startsWith('branch '))?.slice('branch '.length)
-            if (wtBranch === `refs/heads/${branch}` && wtPath === root) {
-              throw new Error(
-                `Branch '${branch}' is checked out at the repository root ('${root}'). ` +
-                `Working in the repo root is not permitted — use a worktree subdirectory. ` +
-                `Switch the repo root to a different branch first, then call use_worktree again.`,
-              )
-            }
+          const worktrees = await listWorktrees($, root)
+          const rootHasBranch = worktrees.some(
+            wt => wt.branch === `refs/heads/${branch}` && wt.path === root,
+          )
+          if (rootHasBranch) {
+            throw new Error(
+              `Branch '${branch}' is checked out at the repository root ('${root}'). ` +
+              `Working in the repo root is not permitted — use a worktree subdirectory. ` +
+              `Switch the repo root to a different branch first, then call use_worktree again.`,
+            )
           }
         } catch (checkErr) {
           if (checkErr.message.includes('is checked out at the repository root')) throw checkErr
@@ -534,26 +535,68 @@ export default async function OpenCodeUse({ client, $ }) {
           }
         } catch (err) {
           const errMsg = err.stderr ?? err.message ?? ''
+
+          // Branch-exists recovery: `git worktree add -b <branch>` failed because the branch
+          // itself already exists (not because the destination path exists). Check whether
+          // that branch is already checked out at a different worktree; if not, retry as a
+          // plain checkout of the existing branch instead of failing.
+          // NOTE: this match is on git's exact (English, untranslated) stderr wording — if a
+          // future git version rewords it, or a translated locale is in effect, this check
+          // silently misses and the tool falls through to the raw-error rethrow below.
+          // This block MUST stay above the generic `errMsg.includes('already exists')` check
+          // below, since git's branch-exists message also contains that substring.
+          if (create && errMsg.includes(`a branch named '${branch}' already exists`)) {
+            let registeredAt = null
+            try {
+              const worktrees = await listWorktrees($, root)
+              registeredAt = worktrees.find(wt => wt.branch === `refs/heads/${branch}`)?.path ?? null
+            } catch {
+              // If listing fails, fall through and attempt the plain checkout below;
+              // `git worktree add` will surface its own error on a genuine conflict.
+            }
+
+            if (registeredAt && registeredAt !== resolved) {
+              throw new Error(
+                `Branch '${branch}' already exists and is checked out at a different worktree ` +
+                `(${registeredAt}). ` +
+                `Call use_worktree with path=${registeredAt}, branch=${branch}, create: false ` +
+                `to reuse that worktree instead.`,
+              )
+            }
+
+            // registeredAt === resolved falls through to the path-already-exists handling
+            // below, which already covers this exact case (including the cross-repo guard).
+            if (!registeredAt) {
+              try {
+                await $`git worktree add ${resolved} ${branch}`.cwd(root).quiet()
+              } catch (retryErr) {
+                throw new Error(`git worktree add failed: ${retryErr.stderr ?? retryErr.message}`)
+              }
+              state.worktree = { path: resolved, owned: true }
+              const { notes } = await applyDirectoryChange($, state, resolved, log)
+              return withNotes(
+                `Worktree created at ${resolved} on branch '${branch}' (existing branch checked out). ` +
+                `Active working directory set to ${resolved}.`,
+                notes,
+              )
+            }
+          }
+
           // Idempotency: path already exists — check if it's a registered worktree for this branch.
           if (errMsg.includes('already exists')) {
             let crossRepoError = null
             try {
-              const listOutput = await $`git worktree list --porcelain`.cwd(root).quiet().text()
-              const isRegistered = listOutput.trim().split('\n\n').some(block => {
-                const lines = block.split('\n')
-                const wtPath = lines.find(l => l.startsWith('worktree '))?.slice('worktree '.length)
-                const wtBranch = lines.find(l => l.startsWith('branch '))?.slice('branch '.length)
-                return wtPath === resolved && wtBranch === `refs/heads/${branch}`
-              })
+              const worktrees = await listWorktrees($, root)
+              const isRegistered = worktrees.some(
+                wt => wt.path === resolved && wt.branch === `refs/heads/${branch}`,
+              )
               if (isRegistered) {
                 // Guard: verify the registered worktree actually belongs to the expected repo.
                 // A prior session may have placed a worktree from a *different* repo at this path
                 // (cross-repo contamination). git worktree list from inside a linked worktree always
                 // lists the main (primary) worktree first — compare its path against the expected root.
                 try {
-                  const wtListFromInside = await $`git worktree list --porcelain`.cwd(resolved).quiet().text()
-                  const firstBlock = wtListFromInside.trim().split('\n\n')[0] ?? ''
-                  const mainWtPath = firstBlock.split('\n').find(l => l.startsWith('worktree '))?.slice('worktree '.length)
+                  const mainWtPath = (await listWorktrees($, resolved))[0]?.path
                   if (mainWtPath && resolve(mainWtPath) !== resolve(root)) {
                     // Capture outside the inner try so it survives the outer catch {}.
                     crossRepoError = new Error(
