@@ -15,7 +15,7 @@
 // guard and `openspec/changes/archive/*/fix-plugin-export-scan/proposal.md`
 // for the full incident writeup.
 
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, isAbsolute, resolve } from 'node:path'
 import { stat, readFile, realpath } from 'node:fs/promises'
 
 /**
@@ -58,19 +58,60 @@ export async function listWorktrees($, root) {
 }
 
 /**
+ * Best-effort realpath: resolves symlinks in `path` for a canonical
+ * comparison basis, without requiring `path` to exist. Walks up to the
+ * nearest existing ancestor (the target worktree path itself typically
+ * doesn't exist yet), realpaths that, then rejoins the non-existent
+ * remainder. Falls back to the original path if realpath fails for any
+ * other reason (e.g. permissions).
+ */
+async function realpathBestEffort(path) {
+  const existing = await nearestExistingDir(path)
+  const suffix = relative(existing, path)
+  try {
+    const real = await realpath(existing)
+    return suffix ? join(real, suffix) : real
+  } catch {
+    return path
+  }
+}
+
+/**
+ * Whether `child` is inside `parent`, or equal to it. Used to validate that a
+ * resolved git root candidate actually contains the target worktree path —
+ * a candidate can be a perfectly valid git repository while still being the
+ * wrong one (e.g. a stale session context left over from an unrelated task).
+ * Both sides are realpath'd before comparing so a symlinked path component
+ * (e.g. a repo checked out under a symlinked directory) doesn't cause a
+ * spurious containment failure against git's own (symlink-resolved) output.
+ */
+async function isPathInsideOrEqual(parent, child) {
+  const realParent = await realpathBestEffort(resolve(parent))
+  const realChild = await realpathBestEffort(resolve(child))
+  const rel = relative(realParent, realChild)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+/**
  * Resolve a validated git root for worktree operations.
  * Tries `candidateRoot` (the session's gitRoot()) first; if that isn't
- * actually inside a git repository, falls back to discovering one by walking
- * up from the nearest existing ancestor of the target worktree path. Throws a
- * clear, actionable error if neither yields a real repository, instead of
+ * actually inside a git repository, or resolves to a git repository that does
+ * NOT contain the target worktree path (e.g. a stale session context pointing
+ * at an unrelated repository from an earlier task), falls back to discovering
+ * one by walking up from the nearest existing ancestor of the target worktree
+ * path — which, by construction, always contains that path. Throws a clear,
+ * actionable error if neither yields a containing repository, instead of
  * letting a raw git subprocess error (e.g. "origin does not appear to be a
- * git repository") leak through from a later command run in the wrong place.
+ * git repository") leak through from a later command run in the wrong place,
+ * or — worse — silently running git operations against the wrong repository.
  */
 export async function resolveGitRoot($, candidateRoot, resolvedWorktreePath) {
   const nearestExisting = await nearestExistingDir(dirname(resolvedWorktreePath))
   for (const cwd of [candidateRoot, nearestExisting]) {
     try {
-      return (await $`git rev-parse --show-toplevel`.cwd(cwd).quiet().text()).trim()
+      const root = (await $`git rev-parse --show-toplevel`.cwd(cwd).quiet().text()).trim()
+      if (!(await isPathInsideOrEqual(root, resolvedWorktreePath))) continue
+      return root
     } catch {
       // Try the next candidate.
     }
