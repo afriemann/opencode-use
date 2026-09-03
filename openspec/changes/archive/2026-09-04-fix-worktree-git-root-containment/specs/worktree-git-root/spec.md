@@ -1,12 +1,4 @@
-# worktree-git-root Specification
-
-## Purpose
-
-Defines how the `use_worktree` tool selects the working directory in which it runs
-git subprocess operations (`git ls-remote`, `git fetch`, `git worktree add`,
-`git worktree list`) when creating or reusing a git worktree.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Git Root Selection
 
@@ -55,6 +47,8 @@ allowing a raw git subprocess error to propagate.
 - WHEN `use_worktree` is invoked with `create: true` and that `path`
 - THEN the tool rejects the session's cached candidate, discovers `repo-b` by walking up from the target path instead, and runs all git operations there — instead of silently creating the worktree against `repo-a`
 
+## ADDED Requirements
+
 ### Requirement: Git Root Reported To Caller
 
 The `use_worktree` tool SHALL include the repository root it ran git operations against in
@@ -66,3 +60,4 @@ was used without a separate inspection step.
 - GIVEN `use_worktree` successfully creates or reuses a worktree
 - WHEN it returns its success message
 - THEN the message names the resolved repository root that git operations ran against
+
