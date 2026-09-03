@@ -38,6 +38,26 @@ export async function nearestExistingDir(path) {
 }
 
 /**
+ * List all worktrees registered against the repository rooted at `root`, via
+ * `git worktree list --porcelain`. Returns `[{ path, branch }]` — `branch` is
+ * the raw `refs/heads/<name>` ref string (or `undefined` for a detached-HEAD
+ * worktree, which has no `branch ` line in the porcelain output). Shared by
+ * every `use_worktree` recovery path that needs to answer "is this branch (or
+ * path) already registered somewhere?" so the porcelain-parsing logic exists
+ * in exactly one place.
+ */
+export async function listWorktrees($, root) {
+  const output = await $`git worktree list --porcelain`.cwd(root).quiet().text()
+  return output.trim().split('\n\n').filter(Boolean).map((block) => {
+    const lines = block.split('\n')
+    return {
+      path: lines.find(l => l.startsWith('worktree '))?.slice('worktree '.length),
+      branch: lines.find(l => l.startsWith('branch '))?.slice('branch '.length),
+    }
+  })
+}
+
+/**
  * Resolve a validated git root for worktree operations.
  * Tries `candidateRoot` (the session's gitRoot()) first; if that isn't
  * actually inside a git repository, falls back to discovering one by walking
