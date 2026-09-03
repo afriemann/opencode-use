@@ -59,11 +59,10 @@ function nodeShellShim(strings, ...values) {
   return builder
 }
 
-/** Create a fresh temp directory and `git init` it, registering its removal on test completion. */
-async function makeTempRepo(t, prefix) {
-  const dir = await makeTempDir(t, prefix)
-  await new Promise((resolvePromise, reject) => {
-    exec('git init -q', { cwd: dir }, (err, stdout, stderr) => {
+/** Run a git command via plain child_process.exec, for test setup outside the shim's shape. */
+function runGit(args, cwd) {
+  return new Promise((resolvePromise, reject) => {
+    exec(`git ${args}`, { cwd }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr || err.message))
         return
@@ -71,6 +70,22 @@ async function makeTempRepo(t, prefix) {
       resolvePromise(stdout)
     })
   })
+}
+
+/**
+ * Create a fresh temp directory, `git init` it, and make an initial commit so
+ * `git worktree add -b <branch>` succeeds on any git version. Older git (pre
+ * auto-orphan-inference, e.g. 2.39.x) fails with "fatal: not a valid object
+ * name: 'HEAD'" on a truly empty repo; newer git (2.43.0+) silently infers
+ * `--orphan` instead. An initial commit makes this test portable across both.
+ * Registers the temp directory's removal on test completion.
+ */
+async function makeTempRepo(t, prefix) {
+  const dir = await makeTempDir(t, prefix)
+  await runGit('init -q', dir)
+  await runGit('config user.email test@example.com', dir)
+  await runGit('config user.name Test', dir)
+  await runGit('commit --allow-empty -q -m init', dir)
   return dir
 }
 
