@@ -13,4 +13,4 @@
 ## 3. Ship
 
 - [x] 3.1 Run the full test suite locally and confirm no regressions
-- [ ] 3.2 Push and open a PR; confirm the GitHub Actions CI run passes on both Node 22 and Node 24
+- [x] 3.2 Push and open a PR; confirm the GitHub Actions CI run passes on both Node 22 and Node 24
