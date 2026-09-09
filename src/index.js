@@ -1,6 +1,7 @@
 import { tool } from '@opencode-ai/plugin'
 import { resolve, isAbsolute, dirname } from 'node:path'
 import { stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import {
   nearestExistingDir,
   resolveGitRoot,
@@ -185,14 +186,31 @@ function appendWorkdirAnnotation(output, source) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Expand a leading `~` (the entire input) or `~/...` (a `~` followed by a
+ * path separator) to the current user's home directory, matching shell
+ * tilde-expansion for the current user only. `~otheruser/...` (tilde
+ * followed by a different username) is intentionally left unexpanded and
+ * falls through to relative-path resolution — there is no portable Node API
+ * for looking up another user's home directory.
+ * See openspec/specs/path-resolution/spec.md, "Tilde Expansion" requirement.
+ */
+function expandHome(inputPath) {
+  if (inputPath === '~') return homedir()
+  if (inputPath.startsWith('~/')) return resolve(homedir(), inputPath.slice(2))
+  return inputPath
+}
+
+/**
  * Resolve a path against a base directory.
- * Absolute paths are returned as-is.
+ * A leading `~` or `~/...` is expanded to the current user's home directory first.
+ * Absolute paths are then returned as-is.
  * Relative paths resolve against ctxDirectory first, stateCwd as fallback.
  */
 function resolvePath(inputPath, ctxDirectory, stateCwd) {
-  if (isAbsolute(inputPath)) return inputPath
-  if (ctxDirectory) return resolve(ctxDirectory, inputPath)
-  if (stateCwd) return resolve(stateCwd, inputPath)
+  const expanded = expandHome(inputPath)
+  if (isAbsolute(expanded)) return expanded
+  if (ctxDirectory) return resolve(ctxDirectory, expanded)
+  if (stateCwd) return resolve(stateCwd, expanded)
   throw new Error(`Cannot resolve relative path '${inputPath}': no base directory available`)
 }
 
@@ -305,7 +323,7 @@ export default async function OpenCodeUse({ client, $ }) {
       'only, no execution) for an .envrc file, appending a reminder to call use_direnv explicitly if found. ' +
       'Returns: "Working directory set to: <resolved-path>", plus any repository-context notes.',
     args: {
-      path: tool.schema.string().describe('Absolute or relative path to set as the working directory'),
+      path: tool.schema.string().describe('Absolute or relative path to set as the working directory (a leading ~ or ~/... expands to the home directory)'),
     },
     async execute({ path }, ctx) {
       try {
@@ -340,7 +358,7 @@ export default async function OpenCodeUse({ client, $ }) {
       'call use_cwd separately if you also need to move there. ' +
       'Returns: "Loaded N variable(s): name1, name2, …" or "direnv loaded — no environment changes exported".',
     args: {
-      path: tool.schema.string().describe('Directory containing the .envrc file to load'),
+      path: tool.schema.string().describe('Directory containing the .envrc file to load (a leading ~ or ~/... expands to the home directory)'),
     },
     async execute({ path }, ctx) {
       try {
@@ -423,7 +441,7 @@ export default async function OpenCodeUse({ client, $ }) {
       'Returns: "Worktree created at <path> on branch \'<branch>\' [(from <remote-base>)]. Active working directory set to <path>. Repository root: <root>.", plus any repository-context notes. ' +
       'The reported repository root is the git repository the operation actually ran against — check it against the expected repository, since a stale session context can otherwise mask a wrong-repository worktree.',
     args: {
-      path: tool.schema.string().describe('Path where the worktree directory will be created (or already exists)'),
+      path: tool.schema.string().describe('Path where the worktree directory will be created (or already exists) (a leading ~ or ~/... expands to the home directory)'),
       branch: tool.schema
         .string()
         .describe('Branch to check out in the worktree (must exist unless create=true)'),
