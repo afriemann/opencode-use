@@ -74,7 +74,7 @@ use_cwd(path: string) → "Working directory set to: <resolved-path>"
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `path` | string | yes | Absolute or relative path. Relative paths resolve against the project directory first, then the current active cwd as fallback. |
+| `path` | string | yes | Absolute or relative path. A leading `~` or `~/...` expands to the current user's home directory. Relative paths resolve against the project directory first, then the current active cwd as fallback. |
 
 After this call the plugin silently sets `workdir` on every subsequent bash invocation. The agent does **not** need to pass `workdir` to bash calls — doing so is redundant (and the tool schema annotation says so).
 
@@ -98,7 +98,7 @@ use_direnv(path: string) → "<N> variable(s) loaded: ..."
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `path` | string | yes | Directory containing the `.envrc` to load. |
+| `path` | string | yes | Directory containing the `.envrc` to load. A leading `~` or `~/...` expands to the current user's home directory. |
 
 - Runs `direnv export json` and captures the environment delta.
 - **Replaces** any previously loaded env — does not merge.
@@ -119,7 +119,7 @@ use_worktree(path: string, branch: string, create?: boolean, fromRemote?: boolea
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `path` | string | yes | Path where the worktree will be created (or already exists). |
+| `path` | string | yes | Path where the worktree will be created (or already exists). A leading `~` or `~/...` expands to the current user's home directory. |
 | `branch` | string | yes | Branch to check out. Must exist unless `create=true`. |
 | `create` | boolean | no | Create a new branch with `git worktree add -b`. Default: `false`. If the branch already exists but isn't checked out anywhere, it's checked out into `path` instead of failing; if it's already checked out at a different worktree path, an error names that path. |
 | `fromRemote` | boolean | no | When `create=true`, fetch from origin first and base the new branch on the remote default branch (auto-detected from the remote) instead of local HEAD. Default: `true`. Pass `false` to create from local HEAD without fetching. |
