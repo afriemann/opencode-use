@@ -7,7 +7,7 @@ import { mkdir, rm } from 'node:fs/promises'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 
-import OpenCodeUse from '../src/index.js'
+import OpenCodeUse from '../src/plugin.v1.js'
 
 let sessionCounter = 0
 function uniqueSessionId() {

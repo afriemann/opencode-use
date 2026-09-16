@@ -1,5 +1,20 @@
 # opencode V2 Compatibility Audit — `opencode-use`
 
+> ⚠️ **Correction (2026-09-16):** everything below tested against
+> `opencode-ai@dev`, which is **not actually V2**. The real V2 product is a
+> separate npm package, `@opencode/cli` (already stable, v2.0.3), with its
+> own plugin SDK `@opencode/plugin` (`Plugin.define({id, setup(ctx)})`) —
+> structurally incompatible with this plugin's current V1 hooks, contrary to
+> what this document's empirical testing against the wrong target implied.
+> A real V2 port is in progress on this same branch (`src/plugin.v2.js`,
+> reusing `src/plugin.v1.js`'s business logic). See the
+> `reality/opencode-v2-sandbox-plugin-compat` memory atom for the full
+> corrected picture, the precise V2 API shapes, and current port status.
+> The content below is preserved for its still-useful empirical method and
+> findings about `opencode-ai@dev` (which remains the V1 line's prerelease
+> channel), but its conclusions about "V2 compatibility" do not apply to the
+> real V2 product.
+
 **Date:** 2026-09-15
 **Tested against:** `opencode-ai@dev` (`0.0.0-dev-202609142154`, published
 2026-09-14), installed as the `opencode2` command via a local sandbox at

@@ -3,15 +3,15 @@
 // opencode's legacy-plugin loader (`getLegacyPlugins` in
 // packages/opencode/src/plugin/index.ts) invokes EVERY top-level named
 // export that is a function as an independent plugin factory, called as
-// `server(input, load.options)`. Any named export from src/index.js besides
+// `server(input, load.options)`. Any named export from src/plugin.v1.js besides
 // `default` is therefore misinterpreted as its own "plugin" and invoked with
 // the wrong argument shape -- this file guards against that class of defect.
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 describe('plugin module export surface (opencode legacy-plugin loader safety)', () => {
-  it('src/index.js exports nothing but default', async () => {
-    const mod = await import('../src/index.js')
+  it('src/plugin.v1.js exports nothing but default', async () => {
+    const mod = await import('../src/plugin.v1.js')
     assert.deepEqual(Object.keys(mod), ['default'])
   })
 
@@ -20,7 +20,7 @@ describe('plugin module export surface (opencode legacy-plugin loader safety)', 
     // the module (getLegacyPlugins does not special-case `default`): each is
     // called as `server(input, load.options)` -- i.e. `fn(fakeInput, undefined)`,
     // not with whatever arguments that export's own signature actually expects.
-    const mod = await import('../src/index.js')
+    const mod = await import('../src/plugin.v1.js')
     const fakeInput = {
       client: { app: { log: () => Promise.resolve() } },
       project: {},

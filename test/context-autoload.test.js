@@ -5,7 +5,7 @@ import { exec } from 'node:child_process'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import OpenCodeUse from '../src/index.js'
+import OpenCodeUse from '../src/plugin.v1.js'
 import {
   discoverGitRoot,
   resolveRepoContext,
@@ -635,7 +635,7 @@ describe('D1 invariant guard (recommended, design.md Component Breakdown)', () =
   it('src/index.js contains no non-null state.cwd assignment (only applyDirectoryChange in lib.js may assign it)', async () => {
     const { readFile: readFileText } = await import('node:fs/promises')
     const { fileURLToPath } = await import('node:url')
-    const source = await readFileText(fileURLToPath(new URL('../src/index.js', import.meta.url)), 'utf8')
+    const source = await readFileText(fileURLToPath(new URL('../src/plugin.v1.js', import.meta.url)), 'utf8')
 
     const offendingLines = []
     source.split('\n').forEach((line, i) => {

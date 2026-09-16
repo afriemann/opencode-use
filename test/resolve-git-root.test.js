@@ -5,7 +5,7 @@ import { exec } from 'node:child_process'
 import { mkdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import OpenCodeUse from '../src/index.js'
+import OpenCodeUse from '../src/plugin.v1.js'
 import { resolveGitRoot } from '../src/lib.js'
 import { makeTempDir } from './helpers.js'
 
