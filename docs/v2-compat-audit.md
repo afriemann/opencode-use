@@ -36,7 +36,7 @@ unaffected. Opting into V2 is an explicit `"./v2"` import.
 | V1 hook | V2 destination |
 |---|---|
 | `tool` (custom tool registration) | `ctx.tool.transform((editor) => editor.add({...}))` |
-| `tool.definition` (workdir schema annotation) | same `transform`, `editor.update(...)`, re-run on `catalog.updated` |
+| `tool.definition` (workdir schema annotation) | same `transform`, `editor.update(...)`, re-run on `mcp.tools.changed` |
 | `tool.execute.before` | `ctx.tool.hook("execute.before", ...)` |
 | `shell.env` | `ctx.shell.hook("create.before", ...)` |
 | `experimental.chat.system.transform` | `ctx.session.hook("context", ...)` |
@@ -136,18 +136,33 @@ copies; it needs a structure that makes it true by construction.
   error with an actionable message) if it's absent, rather than failing
   silently at first tool call. This plugin currently requires a Bun-hosted
   V2 runtime as a result.
-- A `catalog.updated` event (observed to fire when MCP servers connect)
+- The `mcp.tools.changed` event (a real, verified event type in
+  `@opencode/schema`'s event manifest — an earlier draft named this
+  `catalog.updated`, which does not exist and would never have fired)
   triggers a re-scan of tool schemas for workdir eligibility, guarded against
   re-entrancy.
 
 ## Verification
 
-- Full spec suite (`test/`) runs once against `core.js` via injected fakes —
-  both adapters are covered by construction, not by two separately
-  maintained test files.
-- `test/plugin-v2-conformance.test.js` covers V2-adapter wiring only:
-  `options.codemode: false` on every custom tool, hook mutation shapes, and
-  cleanup disposal.
+- **Correction:** the original plan called for re-pointing the five
+  existing spec-suite test files directly at `core.js` (via injected
+  fakes), so the same test file structurally exercises both runtimes. That
+  re-point was **not done** — the five files (`context-autoload`,
+  `path-resolution`, `workdir-injection`, `worktree-branch-reuse`,
+  `resolve-git-root`) still import `plugin.v1.js` unchanged. Since
+  `plugin.v1.js` is now a thin pass-through to `core.js`'s exported
+  functions, this *does* still transitively exercise `core.js`'s logic
+  through the V1 adapter's call path — but it is not the same guarantee as
+  running the same assertions directly against `core.js`, and it says
+  nothing about the V2 *adapter's own wiring* (which hook receives which
+  event shape, whether mutations land on the right object). That wiring is
+  covered separately, and only, by `test/plugin-v2-conformance.test.js`.
+- `test/plugin-v2-conformance.test.js` covers V2-adapter wiring:
+  `options.codemode: false` on every custom tool (via a live assertion in
+  `plugin.v2.js` itself, not just a test), hook mutation shapes, cleanup
+  disposal of all four registrations, the real `mcp.tools.changed` reload
+  path, and that `use_direnv`/`use_worktree`/`use_clear` are each reachable
+  through their V2 `execute()` wrapper.
 - `test/env-resolution-ladder.test.js` covers the V2 shell-env fail-closed
   ladder in isolation (single-session, cwd-match, and ambiguous cases).
 - `npm run test:e2e` (not part of default `npm test`) runs one real

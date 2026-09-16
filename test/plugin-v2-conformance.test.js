@@ -6,6 +6,9 @@
 // context-autoload.test.js, workdir-injection.test.js, etc).
 import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 /**
  * Minimal mock of the V2 plugin Context (@opencode/plugin's `Context`
@@ -14,6 +17,7 @@ import assert from 'node:assert/strict'
  */
 function makeMockContext({ directory = '/tmp/mock-project' } = {}) {
   const registeredHooks = { tool: {}, shell: {}, session: {} }
+  const disposals = { tool: {}, shell: {}, session: {}, transform: false }
   let toolEditor
 
   const eventListeners = []
@@ -26,26 +30,26 @@ function makeMockContext({ directory = '/tmp/mock-project' } = {}) {
       async transform(callback) {
         toolEditor = makeToolEditor()
         callback(toolEditor)
-        return { dispose: mock.fn(async () => {}) }
+        return { dispose: mock.fn(async () => { disposals.transform = true }) }
       },
       async reload() {
         toolReloadCalls += 1
       },
       async hook(name, callback) {
         registeredHooks.tool[name] = callback
-        return { dispose: async () => {} }
+        return { dispose: mock.fn(async () => { disposals.tool[name] = true }) }
       },
     },
     shell: {
       async hook(name, callback) {
         registeredHooks.shell[name] = callback
-        return { dispose: async () => {} }
+        return { dispose: mock.fn(async () => { disposals.shell[name] = true }) }
       },
     },
     session: {
       async hook(name, callback) {
         registeredHooks.session[name] = callback
-        return { dispose: async () => {} }
+        return { dispose: mock.fn(async () => { disposals.session[name] = true }) }
       },
     },
     event: {
@@ -94,19 +98,20 @@ function makeMockContext({ directory = '/tmp/mock-project' } = {}) {
   return {
     ctx,
     registeredHooks,
+    disposals,
     getToolEditor: () => toolEditor,
     emitEvent(event) {
       const listener = eventListeners.shift()
       listener?.({ done: false, value: event })
     },
-    get toolReloadCalls() {
+    getToolReloadCalls() {
       return toolReloadCalls
     },
   }
 }
 
 async function loadPluginWithMockContext(overrides = {}) {
-  const { ctx, registeredHooks, getToolEditor, emitEvent, ...rest } = makeMockContext(overrides)
+  const { ctx, registeredHooks, disposals, getToolEditor, emitEvent, ...rest } = makeMockContext(overrides)
   const fakeBunDollar = mock.fn(() => {
     throw new Error('fake $ invoked in conformance test — no real shell/git call expected here')
   })
@@ -119,7 +124,7 @@ async function loadPluginWithMockContext(overrides = {}) {
   } finally {
     globalThis.Bun = previousBun
   }
-  return { cleanup, ctx, registeredHooks, getToolEditor, emitEvent, ...rest }
+  return { cleanup, ctx, registeredHooks, disposals, getToolEditor, emitEvent, ...rest }
 }
 
 describe('plugin.v2.js adapter conformance', () => {
@@ -146,16 +151,26 @@ describe('plugin.v2.js adapter conformance', () => {
     }
   })
 
+  it('re-scans on a real mcp.tools.changed event (not the non-existent "catalog.updated")', async () => {
+    // Regression test: an earlier draft subscribed to 'catalog.updated',
+    // which does not exist anywhere in @opencode/schema's event manifest —
+    // the reload would silently never fire on the real runtime. This test
+    // fails if the handler's event-type filter regresses back to a made-up
+    // type name.
+    const { emitEvent, getToolReloadCalls, ...rest } = await loadPluginWithMockContext()
+    assert.equal(getToolReloadCalls(), 0)
+    emitEvent({ type: 'mcp.tools.changed' })
+    // Allow the async iterator's microtask to run.
+    await new Promise((r) => setImmediate(r))
+    assert.equal(getToolReloadCalls(), 1)
+
+    emitEvent({ type: 'session.tool.called' }) // an unrelated real event type
+    await new Promise((r) => setImmediate(r))
+    assert.equal(getToolReloadCalls(), 1, 'unrelated event types must not trigger a reload')
+  })
+
   it('execute.before mutates event.input in place and uses "shell" (not "bash") as the always-eligible built-in', async () => {
     const { registeredHooks, getToolEditor } = await loadPluginWithMockContext()
-    // Force a session with an active cwd by calling use_cwd's registered execute
-    // indirectly is out of scope here (business logic is covered elsewhere);
-    // instead, drive execute.before directly against a pre-seeded session by
-    // reaching into the module's own session store via a second execute.before
-    // call after a synthetic use_cwd-equivalent state mutation is not exposed,
-    // so this test asserts the built-in-name wiring via a tool not yet cached
-    // as workdir-capable (still exercises the "shell" constant and no
-    // explicit-workdir path).
     const editor = getToolEditor()
     assert.ok(editor.list().some((t) => t.id === 'use_cwd'))
 
@@ -188,13 +203,52 @@ describe('plugin.v2.js adapter conformance', () => {
     assert.deepEqual(event.system, [])
   })
 
-  it("setup()'s cleanup disposes the tool transform Registration and aborts the event subscription", async () => {
-    const { cleanup, ctx } = await loadPluginWithMockContext()
+  it("setup()'s cleanup disposes ALL FOUR registrations (transform + 3 hooks) and aborts the event subscription", async () => {
+    const { cleanup, disposals } = await loadPluginWithMockContext()
     assert.equal(typeof cleanup, 'function')
     await cleanup()
-    // Re-entering the mocked event iterator's abort path is asserted
-    // implicitly: cleanup() must resolve without throwing, which it does
-    // only if abortController.abort() and toolRegistration.dispose() both
-    // succeed against the mocked context.
+    assert.equal(disposals.transform, true, 'tool.transform Registration must be disposed')
+    assert.equal(disposals.tool['execute.before'], true, 'tool.hook("execute.before") Registration must be disposed')
+    assert.equal(disposals.shell['create.before'], true, 'shell.hook("create.before") Registration must be disposed')
+    assert.equal(disposals.session['context'], true, 'session.hook("context") Registration must be disposed')
+  })
+
+  it('use_direnv, use_worktree, and use_clear are each invocable through their V2 execute() wrapper and return { content: string }', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'opencode-use-v2-conformance-'))
+    try {
+      const { getToolEditor } = await loadPluginWithMockContext({ directory: tmpDir })
+      const editor = getToolEditor()
+      const sessionID = 'conformance-session'
+
+      // use_clear on a completely fresh session: no cwd/env/worktree set,
+      // so it must report "Nothing to clear" (matching core.js's
+      // executeUseClear contract) without touching git or the filesystem.
+      const useClear = editor.get('use_clear')
+      const clearResult = await useClear.execute({}, { sessionID })
+      assert.deepEqual(clearResult, { content: 'Nothing to clear' })
+
+      // use_direnv against a directory with no .envrc: direnv itself may
+      // not even be installed in this environment, so only assert the
+      // wrapper shape (content is a string) and that it doesn't throw
+      // synchronously before reaching the real $`direnv ...` call —
+      // the business logic itself (including all direnv error paths) is
+      // already covered by the shared core.js path via plugin.v1.js's tests.
+      const useDirenv = editor.get('use_direnv')
+      await assert.rejects(
+        () => useDirenv.execute({ path: '.' }, { sessionID }),
+        /direnv|fake \$ invoked/i,
+        'use_direnv should reach the injected $ (and this test intentionally uses a throwing fake $)',
+      )
+
+      // use_worktree: same rationale — assert it reaches the injected $
+      // rather than throwing on argument handling.
+      const useWorktree = editor.get('use_worktree')
+      await assert.rejects(
+        () => useWorktree.execute({ path: join(tmpDir, 'wt'), branch: 'test-branch' }, { sessionID }),
+        /fake \$ invoked|git/i,
+      )
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
   })
 })

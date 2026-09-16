@@ -33,7 +33,7 @@ support users still on V1.
     silently becoming Code-Mode-only (V2's default for a tool with no
     `options` set — confirmed empirically to break direct tool-calling).
   - tool-schema `workdir` annotation (was `tool.definition`) → re-run via
-    `editor.update`, re-triggered on `catalog.updated` events, with a
+    `editor.update`, re-triggered on `mcp.tools.changed` events, with a
     re-entrancy guard.
   - `tool.execute.before` → `ctx.tool.hook("execute.before", ...)`.
   - `shell.env` → `ctx.shell.hook("create.before", ...)`, using a

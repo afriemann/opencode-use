@@ -104,7 +104,7 @@ appears, the seam for adding one already exists.
 | V1 hook | V2 destination | Payload contract |
 |---|---|---|
 | tool map (`use_cwd`, `use_direnv`, `use_worktree`, `use_clear`) | `ctx.tool.transform((editor) => editor.add(...))` | `Tool.Info`: `{ name, input: JsonSchema, description, execute(input, ToolContext), output?, options? }`. Schemas are **always** JSON Schema in V2. |
-| `tool.definition` (workdir annotation) | same `transform`, via `editor.update(id, (tool) => …)`; re-run on `catalog.updated` | `ToolEditor`: `list()`, `get(id)`, `namespace(…)`, `add(tool)`, `update(id, fn)`, `remove(id)` |
+| `tool.definition` (workdir annotation) | same `transform`, via `editor.update(id, (tool) => …)`; re-run on `mcp.tools.changed` | `ToolEditor`: `list()`, `get(id)`, `namespace(…)`, `add(tool)`, `update(id, fn)`, `remove(id)` |
 | `tool.execute.before` | `ctx.tool.hook("execute.before", …)` | `{ tool, sessionID, agent, messageID, id, input }` — `input` is mutable; **mutate in place** |
 | `shell.env` | `ctx.shell.hook("create.before", …)` | `{ command, cwd, timeout, shell, env }` — mutate `event.env` in place. **No `sessionID`** → see D6 |
 | `experimental.chat.system.transform` | `ctx.session.hook("context", …)` | `SessionContext`: `{ sessionID, agent, system, messages, tools, options }` — push `{ type: 'text', text }` onto `event.system` |
@@ -224,11 +224,19 @@ legitimately differs, and `core.js` builds both variants from one template.
 session-idle event, pruning ended sessions' env makes rule 1 hit far more often.
 Do not invent an event name — verify one exists first.
 
-## D7 — Catalog re-scan on `catalog.updated`
+## D7 — Catalog re-scan on `mcp.tools.changed`
 
 `ctx.tool.transform(...)` returns a Registration (`.dispose()`); re-running it —
-or `ctx.tool.reload()` — picks up tools that appear after setup (confirmed to
-fire when MCP servers connect). `ctx.event.subscribe` exists on `EventDomain`.
+or `ctx.tool.reload()` — picks up tools that appear after setup. **Correction:**
+an earlier draft of this design named this event `catalog.updated`, which
+does not exist anywhere in `@opencode/schema`'s event manifest (verified by
+enumerating every event `type` literal in the installed package's own
+`event-manifest.d.ts` — a `code-reviewer` finding). The real, verified-to-
+exist event is `mcp.tools.changed`; whether it actually fires on every MCP
+server connect (as its name strongly implies) has not been confirmed via a
+live run with an MCP server connecting mid-session — only that it is a real
+member of the event type union, unlike the fabricated name it replaces.
+`ctx.event.subscribe` exists on `EventDomain`.
 
 Three requirements on the implementation:
 
@@ -236,7 +244,7 @@ Three requirements on the implementation:
   "already contains the annotation" guard is what makes reload non-destructive,
   and it is load-bearing, not an optimisation.
 - **Recursion guard.** Calling `ctx.tool.reload()` from inside a
-  `catalog.updated` handler can plausibly re-emit `catalog.updated`. The handler
+  `mcp.tools.changed` handler can plausibly re-emit `mcp.tools.changed`. The handler
   must not re-enter while a reload is in flight. The WIP has no such guard.
 - **Cleanup.** The subscription is aborted from the `setup()` return value; the
   transform Registration is disposed alongside it.
@@ -265,11 +273,22 @@ Three layers. Layers 1–2 are hermetic and run under `node --test` in the defau
 `npm test`, matching the existing suite's style (fake `$`, real temp dirs, one
 `// spec:` header per file). Layer 3 is a separate script and CI job.
 
-**Layer 1 — Spec suite against `core.js`.** The five spec files are exercised
-once, against injected fakes, not twice against two entrypoints. This is the
-payoff of D1: "the same specs hold on both runtimes" becomes structurally true
-rather than a thing two test files separately assert. Existing tests are
-re-pointed from `plugin.v1.js` to the core seam; their assertions do not change.
+**Layer 1 — Spec suite against `core.js`** (as designed; **not fully carried
+out** — see the implementation-status note at the end of this section). The
+five spec files should be exercised once, against injected fakes, not twice
+against two entrypoints. This is the intended payoff of D1: "the same specs
+hold on both runtimes" becomes structurally true rather than a thing two
+test files separately assert. Existing tests are re-pointed from
+`plugin.v1.js` to the core seam; their assertions do not change.
+
+> **Implementation status:** the five existing spec test files were left
+> importing `plugin.v1.js` unchanged (zero diff), not re-pointed at
+> `core.js` directly. Because `plugin.v1.js` is a thin pass-through, this
+> still transitively exercises `core.js`'s logic — but it does not
+> structurally guarantee the V2 adapter's own wiring is correct the way
+> this section originally intended; that is instead covered separately by
+> Layer 2's `plugin-v2-conformance.test.js`. Re-pointing these five files
+> remains a legitimate follow-up.
 
 **Layer 2 — Adapter conformance, one file per entrypoint.** Mocks the host
 surface (`ctx` for V2, the plugin input for V1) and asserts the *wiring only*:
@@ -342,7 +361,7 @@ omission recurring):
 | `globalThis.Bun.$` absent (non-Bun V2 host) | Plugin load | Fails loudly at `setup()` with an actionable message — not at first tool use (D2). |
 | `options.codemode` dropped on a new tool | That tool becomes unreachable | Caught by the layer-2 assertion and the layer-3 E2E (D4). Invisible to any other check. |
 | Concurrent sessions with distinct envs | One shell invocation | Fails closed: no env injected, one diagnostic logged (D6). Never injects another session's env. |
-| `catalog.updated` storm / reload recursion | Plugin CPU | Guarded by the re-entrancy check and idempotent annotation (D7). |
+| `mcp.tools.changed` storm / reload recursion | Plugin CPU | Guarded by the re-entrancy check and idempotent annotation (D7). |
 | V2 namespaces tool ids | Self-annotation / self-injection | Prevented by keying the exclusion set on `list()` ids — pending the D8 verification. |
 | V1 SDK absent for a V2-only consumer | Install | Prevented by marking both peer deps optional (D5). |
 
@@ -369,7 +388,7 @@ sequencing — both belong to the implementing agent.
 | 2 | `src/plugin.v1.js` — reduced to a V1 adapter over `core.js` | Application code (JS) | Existing V1 tests pass unchanged in assertion content; file exports `default` only |
 | 3 | `src/plugin.v2.js` — V2 adapter: `Plugin.define`, the five-hook mapping (D3), `shell` built-in name, `Bun.$` resolution with a loud failure, cleanup | Application code (JS) | Layer-2 conformance suite passes; file exports `default` only |
 | 4 | D6 env-resolution ladder + the V2-variant context-block caveat line | Application code (JS) | Single-env, cwd-match, and ambiguous cases each assert the specified outcome, including the no-injection + log case |
-| 5 | `catalog.updated` re-scan with re-entrancy guard and disposal | Application code (JS) | Repeated reloads annotate exactly once; cleanup disposes subscription and registration |
+| 5 | `mcp.tools.changed` re-scan with re-entrancy guard and disposal | Application code (JS) | Repeated reloads annotate exactly once; cleanup disposes subscription and registration |
 | 6 | D8 tool-id/namespace verification against the live catalog | Investigation | The exclusion set is keyed on the value `list()` actually reports, evidenced from a real run |
 | 7 | `package.json` — exports map, both peer deps optional, `@opencode/cli` devDependency, `test` / `test:e2e` scripts | Packaging | A V2-only and a V1-only install each resolve without pulling the other SDK |
 | 8 | Spec deltas R1–R3 | Spec authoring | `openspec/specs/{workdir-injection,context-autoload}` carry no unsatisfiable V1-mechanism requirement, and the V2 env-scoping clause exists |

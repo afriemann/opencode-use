@@ -356,6 +356,24 @@ export const V2_ENV_INJECTION_CAVEAT =
 // Tool descriptions (shared text; schema shape is built per-adapter)
 // ---------------------------------------------------------------------------
 
+/**
+ * design.md D4: the single source of truth for each V2 tool's `options`.
+ * MUST be spread into every V2 `editor.add()` call (never re-typed at the
+ * call site) — a per-call-site literal is exactly the kind of thing that
+ * silently gets dropped when a new tool is added. `V2_CUSTOM_TOOL_NAMES` is
+ * exported alongside so an adapter-level assertion can verify every name in
+ * this list actually got `options.codemode === false` on the live catalog
+ * (see plugin.v2.js's registerAndAnnotate).
+ */
+export const V2_TOOL_OPTIONS = {
+  use_cwd: { codemode: false },
+  use_direnv: { codemode: false },
+  use_worktree: { codemode: false },
+  use_clear: { codemode: false },
+}
+
+export const V2_CUSTOM_TOOL_NAMES = Object.keys(V2_TOOL_OPTIONS)
+
 export const TOOL_TEXT = {
   use_cwd: {
     description:

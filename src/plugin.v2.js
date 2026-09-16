@@ -6,7 +6,7 @@
 //
 //   V1 hook                                V2 destination
 //   tool map                               ctx.tool.transform(editor.add(...))
-//   tool.definition                        same transform, editor.update(...) on catalog.updated
+//   tool.definition                        same transform, editor.update(...) on mcp.tools.changed
 //   tool.execute.before                    ctx.tool.hook("execute.before", ...)
 //   shell.env                              ctx.shell.hook("create.before", ...)
 //   experimental.chat.system.transform      ctx.session.hook("context", ...)
@@ -36,6 +36,8 @@ import {
   buildActiveSessionContextBlock,
   buildAgentsMdBlock,
   V2_ENV_INJECTION_CAVEAT,
+  V2_TOOL_OPTIONS,
+  V2_CUSTOM_TOOL_NAMES,
   TOOL_TEXT,
   executeUseCwd,
   executeUseDirenv,
@@ -77,7 +79,7 @@ export default Plugin.define({
   async setup(ctx) {
     const log = makeLogger(ctx)
     const { sessions, getState } = createSessionStore()
-    const directory = ctx.location?.directory ?? ctx.directory ?? process.cwd()
+    const directory = ctx.location?.directory ?? process.cwd()
 
     // design.md D2: V2's Context has no shell-exec member. Fail loudly at
     // load time — not at first tool call — if the Bun global is absent.
@@ -112,7 +114,7 @@ export default Plugin.define({
             required: ['path'],
             additionalProperties: false,
           },
-          options: { codemode: false },
+          options: V2_TOOL_OPTIONS.use_cwd,
           async execute(input, toolCtx) {
             const state = getState(toolCtx.sessionID)
             return { content: await executeUseCwd(input, state, deps) }
@@ -129,7 +131,7 @@ export default Plugin.define({
             required: ['path'],
             additionalProperties: false,
           },
-          options: { codemode: false },
+          options: V2_TOOL_OPTIONS.use_direnv,
           async execute(input, toolCtx) {
             const state = getState(toolCtx.sessionID)
             return { content: await executeUseDirenv(input, state, deps) }
@@ -150,7 +152,7 @@ export default Plugin.define({
             required: ['path', 'branch'],
             additionalProperties: false,
           },
-          options: { codemode: false },
+          options: V2_TOOL_OPTIONS.use_worktree,
           async execute(input, toolCtx) {
             const state = getState(toolCtx.sessionID)
             return { content: await executeUseWorktree(input, state, deps) }
@@ -171,7 +173,7 @@ export default Plugin.define({
             },
             additionalProperties: false,
           },
-          options: { codemode: false },
+          options: V2_TOOL_OPTIONS.use_clear,
           async execute(input, toolCtx) {
             const state = getState(toolCtx.sessionID)
             return { content: await executeUseClear(input, state, deps) }
@@ -185,10 +187,28 @@ export default Plugin.define({
      * workdir-eligible schema. Idempotent — the WORKDIR_ANNOTATION sentinel
      * in `annotateJsonSchemaProp` guards re-running this against the same
      * definition objects, which is what makes catalog reload safe (D7).
+     *
+     * D4 guard: after registering, assert every V2_CUSTOM_TOOL_NAMES entry
+     * is actually present in the live catalog with codemode: false — this
+     * is the adapter-level safety net design.md calls for, catching a
+     * tool that's silently missing its options (e.g. a future refactor
+     * that stops spreading V2_TOOL_OPTIONS) before it reaches production
+     * silently as Code-Mode-only.
      */
     function registerAndAnnotate(editor) {
       for (const descriptor of toolDescriptors()) {
         editor.add(descriptor)
+      }
+
+      for (const toolName of V2_CUSTOM_TOOL_NAMES) {
+        const registered = editor.get(toolName)
+        if (!registered || registered.options?.codemode !== false) {
+          throw new Error(
+            `opencode-use (V2): tool "${toolName}" is missing options.codemode: false after registration — ` +
+            `it would silently become Code-Mode-only (indirect-call-only). This is a bug in plugin.v2.js/core.js, ` +
+            `not a runtime condition — please report it.`,
+          )
+        }
       }
 
       for (const t of editor.list()) {
@@ -220,8 +240,16 @@ export default Plugin.define({
     })
 
     // -----------------------------------------------------------------------
-    // Catalog re-scan on catalog.updated (D7), with a re-entrancy guard
+    // Catalog re-scan on mcp.tools.changed (D7), with a re-entrancy guard
     // -----------------------------------------------------------------------
+    //
+    // Corrected from an earlier draft's `catalog.updated`, which does not
+    // exist in the real event manifest (verified against the installed
+    // @opencode/schema package's event-manifest.d.ts — the exhaustive union
+    // of every event type the host can emit). `mcp.tools.changed` is the
+    // real event fired when an MCP server's tool set changes (including on
+    // initial connect), which is what actually needs a re-scan for
+    // newly-appeared tools' workdir eligibility.
 
     const abortController = new AbortController()
     let reloadInFlight = false
@@ -229,13 +257,13 @@ export default Plugin.define({
     ;(async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: abortController.signal })) {
-          if (event?.type !== 'catalog.updated') continue
+          if (event?.type !== 'mcp.tools.changed') continue
           if (reloadInFlight) continue // re-entrancy guard: a reload already in flight
           reloadInFlight = true
           try {
             await ctx.tool.reload()
           } catch (err) {
-            log('catalog.updated reload failed', err)
+            log('mcp.tools.changed reload failed', err)
           } finally {
             reloadInFlight = false
           }
@@ -249,7 +277,7 @@ export default Plugin.define({
     // tool.execute.before → ctx.tool.hook("execute.before", ...)
     // -----------------------------------------------------------------------
 
-    await ctx.tool.hook('execute.before', (event) => {
+    const executeBeforeRegistration = await ctx.tool.hook('execute.before', (event) => {
       try {
         const state = sessions.get(event.sessionID)
         if (!state) return
@@ -282,7 +310,7 @@ export default Plugin.define({
     // D6: no sessionID on this payload — use the fail-closed resolution ladder.
     // -----------------------------------------------------------------------
 
-    await ctx.shell.hook('create.before', (event) => {
+    const createBeforeRegistration = await ctx.shell.hook('create.before', (event) => {
       try {
         const resolved = resolveEnvSessionForShell(sessions, { cwd: event.cwd })
         if (!resolved) return
@@ -305,7 +333,7 @@ export default Plugin.define({
     // experimental.chat.system.transform → ctx.session.hook("context", ...)
     // -----------------------------------------------------------------------
 
-    await ctx.session.hook('context', (event) => {
+    const contextRegistration = await ctx.session.hook('context', (event) => {
       try {
         const state = sessions.get(event.sessionID)
         if (!state) return
@@ -336,6 +364,9 @@ export default Plugin.define({
     return async () => {
       abortController.abort()
       await toolRegistration?.dispose?.()
+      await executeBeforeRegistration?.dispose?.()
+      await createBeforeRegistration?.dispose?.()
+      await contextRegistration?.dispose?.()
     }
   },
 })
