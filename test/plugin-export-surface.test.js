@@ -55,4 +55,20 @@ describe('plugin module export surface (opencode legacy-plugin loader safety)', 
 
     assert.ok(defaultAsserted, 'expected the module to have a default export to assert against')
   })
+
+  it('src/plugin.v2.js exports nothing but default', async () => {
+    const mod = await import('../src/plugin.v2.js')
+    assert.deepEqual(Object.keys(mod), ['default'])
+  })
+
+  it('src/plugin.v2.js default export is a Plugin.define object, not a function (V1 loader hazard does not apply, but export-surface hygiene still does)', async () => {
+    const mod = await import('../src/plugin.v2.js')
+    assert.equal(typeof mod.default, 'object')
+    assert.ok(mod.default !== null)
+  })
+
+  it('src/core.js has no default export (imported by adapters, never scanned as a plugin candidate)', async () => {
+    const mod = await import('../src/core.js')
+    assert.equal('default' in mod, false)
+  })
 })

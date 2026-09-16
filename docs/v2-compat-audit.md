@@ -1,174 +1,179 @@
-# opencode V2 Compatibility Audit — `opencode-use`
+# opencode V2 Compatibility — `opencode-use`
 
-> ⚠️ **Correction (2026-09-16):** everything below tested against
-> `opencode-ai@dev`, which is **not actually V2**. The real V2 product is a
-> separate npm package, `@opencode/cli` (already stable, v2.0.3), with its
-> own plugin SDK `@opencode/plugin` (`Plugin.define({id, setup(ctx)})`) —
-> structurally incompatible with this plugin's current V1 hooks, contrary to
-> what this document's empirical testing against the wrong target implied.
-> A real V2 port is in progress on this same branch (`src/plugin.v2.js`,
-> reusing `src/plugin.v1.js`'s business logic). See the
-> `reality/opencode-v2-sandbox-plugin-compat` memory atom for the full
-> corrected picture, the precise V2 API shapes, and current port status.
-> The content below is preserved for its still-useful empirical method and
-> findings about `opencode-ai@dev` (which remains the V1 line's prerelease
-> channel), but its conclusions about "V2 compatibility" do not apply to the
-> real V2 product.
+**Status: real V2 support shipped** (`src/plugin.v2.js`), alongside the
+unchanged V1 implementation (`src/plugin.v1.js`). Both share the runtime-
+agnostic business logic in `src/core.js`. See `openspec/changes/archive/`
+(after archival) for the full proposal, design, and specs.
 
-**Date:** 2026-09-15
-**Tested against:** `opencode-ai@dev` (`0.0.0-dev-202609142154`, published
-2026-09-14), installed as the `opencode2` command via a local sandbox at
-`~/opencode-v2-sandbox`. See the `reality/opencode-v2-sandbox-plugin-compat`
-memory atom for the reusable sandbox setup steps.
+> ℹ️ **History note:** an earlier version of this document (dated
+> 2026-09-15) tested this plugin against `opencode-ai@dev` and concluded no
+> migration was needed. That target was **not actually V2** —
+> `opencode-ai` (all its dist-tags) is the V1 product's own prerelease
+> channel. The real V2 product is a separate npm package, `@opencode/cli`
+> (stable, currently v2.0.4), with its own plugin SDK `@opencode/plugin`
+> (`Plugin.define({ id, setup(ctx) })`). That prior audit's empirical
+> findings about `opencode-ai@dev` remain true but do not describe V2
+> compatibility. This document replaces it with the real V2 port's status
+> and findings.
 
-## What "opencode V2" is
+## What changed
 
-opencode is incrementally merging an Effect-based rewrite (`packages/core`)
-into the *same* `opencode-ai` npm package this plugin already targets — it is
-not a separate package or CLI. Progress is exposed via prerelease dist-tags
-(confirmed via `npm view opencode-ai dist-tags --json`): `latest` (stable,
-`1.18.31` as of this audit), `next`, `beta`, `dev` (freshest, published
-near-daily). There is no install-time "v2 mode" flag; you track V2 progress
-by installing a fresher dist-tag. V2 ships its own plugin API
-(`@opencode-ai/plugin/v2/{effect,promise}`, documented in
-`packages/plugin/src/v2/{effect,promise}/README.md` in the
-`anomalyco/opencode` source) with hook shapes structurally different from the
-V1 API this plugin uses.
+Both `plugin.v1.js` and `plugin.v2.js` are thin adapters over the same
+`core.js` — the same behavior (custom tools, workdir injection, shell-env
+injection, AGENTS.md auto-discovery, system-prompt context) now runs
+identically on both opencode generations:
 
-**Important methodology note:** reading V2 source/docs alone is misleading.
-`packages/core/src/tool/bash.ts` (V2's bash tool) carries a literal
-`// TODO: Add plugin shell.env environment augmentation once V2 plugin hooks
-exist.` comment, and the V2 plugin README documents no `tool`/`shell`/`chat`
-domain — which suggested (wrongly, on its own) that V1 tool/shell hooks might
-already be broken on a `dev` build. An empirical test (below) shows they are
-not. Running `opencode2 debug v2` in the test project returned:
-
-```json
-{"providers": [], "default": {"_id": "Effect", "op": "OnSuccess", "args": {"_id": "Effect", "op": "WithFiber"}}, "small": {}}
-```
-
-confirming V2 is live today only for the **catalog** domain (providers/
-models); it has not yet replaced the V1 plugin runtime that handles
-`tool`/`shell`/`chat` hooks. (Full command output also archived in the
-`reality/opencode-v2-sandbox-plugin-compat` memory atom.) Conclusions below
-are based on running this plugin, unmodified, against the real `dev` build —
-not on inference from V2 source alone.
-
-## Hooks registered by this plugin (`src/index.js`)
-
-| Hook | Purpose |
+| Consumer wants | Import |
 |---|---|
-| `tool` | Registers the plugin's own tools: `use_cwd`, `use_direnv`, `use_worktree`, `use_clear` |
-| `tool.definition` | Caches per-tool `workdir`-parameter eligibility and annotates eligible tools' schemas |
-| `tool.execute.before` | Injects the session's active cwd as `output.args.workdir` for eligible tool calls |
-| `shell.env` | Injects direnv-loaded environment variables into bash tool executions |
-| `experimental.chat.system.transform` | Injects active cwd/env/worktree state into the system prompt for non-bash tools |
+| V1 (`opencode-ai` / `@opencode-ai/plugin`, current default) | `opencode-use` or `opencode-use/v1` |
+| V2 (`@opencode/cli` / `@opencode/plugin`) | `opencode-use/v2` |
 
-## Empirical test result
+`package.json`'s `main`/`"."` still resolve to V1 — existing installs are
+unaffected. Opting into V2 is an explicit `"./v2"` import.
 
-**Setup:** scratch project at `/tmp/opencode/v2-sandbox/test-opencode-use`
-with `opencode.json` pointing `plugin` at this repo's `src/index.js` (this
-worktree, unmodified).
+## V1 → V2 hook mapping
 
-**Run 1** — establishes baseline hook registration and no-error execution:
+| V1 hook | V2 destination |
+|---|---|
+| `tool` (custom tool registration) | `ctx.tool.transform((editor) => editor.add({...}))` |
+| `tool.definition` (workdir schema annotation) | same `transform`, `editor.update(...)`, re-run on `catalog.updated` |
+| `tool.execute.before` | `ctx.tool.hook("execute.before", ...)` |
+| `shell.env` | `ctx.shell.hook("create.before", ...)` |
+| `experimental.chat.system.transform` | `ctx.session.hook("context", ...)` |
 
-```
-opencode2 run "Use the bash tool to run 'echo hello-from-shell-env-test' and \
-  then use the use_cwd tool to set the working directory to /tmp" \
-  --print-logs --log-level DEBUG
-```
+## Required tool option: `options: { codemode: false }`
 
-**Run 2** — corrected ordering (`use_cwd` *before* a second `bash` call) to
-directly observe the injection mechanism, not just absence of error:
-
-```
-opencode2 run "First use the use_cwd tool to set the working directory to \
-  <project>/cwd-target, then AFTER that use the bash tool to run 'echo ...; pwd'" \
-  --print-logs --log-level DEBUG
-```
-
-Run 2 produced the log line:
+**This is the single most important fact for anyone porting a plugin's
+custom tools to V2.** A tool registered via `editor.add()` with no
+`options.codemode` set (or `codemode: true`) is **Code-Mode-only**: the
+model can only reach it indirectly, via a separate `execute` JS-execution
+tool (`await tools.use_cwd({...})`), never as a direct native tool call.
+Confirmed empirically against the real `@opencode/cli` 2.0.4 runtime:
 
 ```
-[opencode-use] workdir-injection: bash => /tmp/opencode/v2-sandbox/test-opencode-use/cwd-target
+✗ use_cwd {"path":"."} failed
+Error: No tool named "use_cwd" is currently available. Please use a tool from the available tool list.
+⚙ execute {"code":"return await tools.use_cwd({ path: \".\" });"}
 ```
 
-— this is `src/index.js`'s `tool.execute.before` success-path log
-(`log(`workdir-injection: ${input.tool} => ${state.cwd}`)`, line 869), fired
-only when injection actually happens. This is direct positive evidence, not
-merely absence of an error.
+Setting `options: { codemode: false }` on the tool descriptor fixes this —
+the tool becomes directly callable with no fallback:
 
-**Result — all 5 hooks fired without error; 2 have direct positive evidence, 1 partial, 2 no-error-only:**
-
-| Hook | Result | Evidence |
-|---|---|---|
-| `tool` | ✅ Pass (partial scope) | `use_cwd` tool call executed successfully: `use_cwd {"path":"/tmp"}` → `Working directory set to /tmp`. Only `use_cwd` was exercised in these runs — `use_direnv`, `use_worktree`, and `use_clear` (also registered via this same `tool` hook) were not called, so this row does not confirm those three. |
-| `tool.definition` | ✅ Pass | 60 `[opencode-use] workdir-capability: <tool> => <bool>` log lines emitted, one per available tool, zero errors |
-| `tool.execute.before` | ✅ Pass (direct evidence) | Run 2's `workdir-injection: bash => .../cwd-target` log line is the hook's own success-path log, proving the injection mechanism actually ran, not just that it didn't throw |
-| `shell.env` | ⚠️ Pass (not fully exercised) | No failure logged (`log('shell.env failed', err)` absent) in either run, but no active `direnv` `.envrc` was present in the test project, so actual env-variable content wasn't observed — only that the hook didn't throw |
-| `experimental.chat.system.transform` | ⚠️ Pass (no error only) | No failure logged (`log('chat.system.transform failed', err)` absent) in either run. This hook has no success-path log call (only pushes to `output.system` silently), and the CLI's `--print-logs` output doesn't dump full system-prompt content, so the actual injected `## Active Session Context` block was not directly observed in these runs — code inspection confirms it only activates once `state.cwd`/`state.envSource`/`state.worktree` are populated (i.e. after `use_cwd`/`use_direnv`/`use_worktree` ran), consistent with no error occurring. |
-
-The only load failure observed in either test run was unrelated:
-`~/.config/opencode/plugins/opencode-openspec.js` failed with
-`command.trim is not a function` — a separate, real regression in
-`opencode-openspec` against this `dev` build, tracked under that repo's own
-audit (not `opencode-use`).
-
-## Cross-reference against the documented V2 plugin API
-
-V2's plugin API (`packages/plugin/src/v2/{effect,promise}/README.md`)
-currently documents only these domains/hooks:
-
-- Transform hooks: `agent`, `catalog`, `command`, `integration`, `reference`,
-  `skill` (each via `.transform()`)
-- Runtime hooks: `aisdk.sdk`, `aisdk.language`
-
-None of `opencode-use`'s five hooks (`tool`, `tool.definition`,
-`tool.execute.before`, `shell.env`, `experimental.chat.system.transform`) are
-part of this documented V2 set. Empirically, though, they all still work
-today — they run on the V1 plugin runtime, which is running in parallel with
-V2's (so-far catalog-only) migration, not yet replaced by it.
-
-## Risk rating and recommended action
-
-Risk here means *likelihood × impact of this hook breaking on a future V2
-migration* — not a security severity scale (distinct from the `code-reviewer`
-agent's Blocker/Warning/Suggestion vocabulary used elsewhere in this repo).
-
-| Hook | Risk | Recommended action |
-|---|---|---|
-| `tool` (custom tool registration) | Medium | No V2-documented equivalent for registering arbitrary tools. Re-test on each `dev` bump; watch `packages/core` for a `tool` domain addition. |
-| `tool.definition` | Medium | Same as above — no V2 domain covers tool-schema introspection/mutation yet. |
-| `tool.execute.before` | Medium-High | This is the plugin's core mechanism (cwd injection). `packages/core/src/tool/bash.ts`'s TODO comment is the clearest signal V2 hasn't wired equivalent interception yet. Highest-priority hook to re-test on every `dev` bump. |
-| `shell.env` | Medium-High | Same TODO comment applies directly to this hook (it names `shell.env` explicitly). Confirmed not erroring today; next audit pass should add a `.envrc` (e.g. `export FOO=bar`) to the scratch project, call `use_direnv`, then run `bash` and grep the command's actual environment for `FOO` to get full positive evidence, matching what was done for `tool.execute.before` in this pass. |
-| `experimental.chat.system.transform` | Low-Medium | Marked `experimental` in V1 already; no V2 chat/session domain documented. Watch for either a V1 removal or a V2 equivalent appearing together. |
-
-**Overall:** No action needed today — every hook this plugin depends on works
-correctly against the current `dev` prerelease. Re-run this same empirical
-test (`opencode2 run ... --print-logs --log-level DEBUG` against a scratch
-project) after refreshing `~/opencode-v2-sandbox` to a newer `dev` build
-periodically, and especially before any `latest` version bump that crosses
-a major version boundary. Escalate to actual migration work only if a hook
-starts failing or logging errors in that test.
-
-## How to reproduce this test
-
-```bash
-# Refresh the sandbox to the latest dev build
-cd ~/opencode-v2-sandbox && npm install opencode-ai@dev
-# npm's `allowScripts` security default blocks postinstall scripts, but this
-# package's postinstall is what downloads the actual platform binary — run
-# it manually after every install/update:
-node node_modules/opencode-ai/postinstall.mjs
-opencode2 --version   # confirm the build date/tag
-
-# Scratch project pointing at this plugin
-mkdir -p /tmp/opencode-use-v2-test && cd /tmp/opencode-use-v2-test
-cat > opencode.json << 'EOF'
-{ "$schema": "https://opencode.ai/config.json",
-  "plugin": ["/absolute/path/to/opencode-use/src/index.js"] }
-EOF
-
-opencode2 run "Use the bash tool to run 'echo test' and then use the use_cwd tool to set the working directory to /tmp" \
-  --print-logs --log-level DEBUG 2>&1 | grep -iE "opencode-use|failed"
 ```
+⚙ use_cwd {"path":"."}
+```
+
+`options: { pinned: true }` does **not** fix this (tested — no effect on
+direct callability); do not confuse the two. `codemode`'s default/effect is
+documented in plain prose only for MCP server config
+(https://opencode.ai/v2/docs/mcp-servers/: "Defaults to `true`. Set to
+`false` to expose the server's tools directly to the model instead of
+through Code Mode.") — the plugin `ctx.tool.transform` docs page uses the
+identical field/shape but never states a default for plugin tools
+specifically; this was confirmed by direct empirical testing, not doc prose
+alone.
+
+Every custom tool this plugin registers on V2 sets `options.codemode: false`
+in its shared `core.js` descriptor (not per-call — see design rationale
+below).
+
+## Known limitation: shell-environment injection without a `sessionID`
+
+V2's `ShellCreateBefore` hook payload (`ctx.shell.hook("create.before", ...)`)
+carries `{ command, cwd, timeout, shell, env }` — **no `sessionID`**, unlike
+V1's `shell.env` hook. This plugin's environment injection (`use_direnv`)
+is normally scoped per-session by `sessionID`; on V2 that information is not
+available.
+
+**Mitigation:** a fail-closed resolution ladder, in this order:
+
+1. If exactly one tracked session has a non-empty environment, use it.
+2. Otherwise, if exactly one env-bearing session's working directory equals
+   or is an ancestor of the shell invocation's `cwd`, use that session's
+   environment.
+3. Otherwise, inject **nothing**, and log the candidate sessions once.
+
+This never injects one session's environment into a different session's
+shell call — an ambiguous case always resolves to "inject nothing," never a
+guess. **Practical impact:** if you run multiple concurrent opencode
+sessions on V2, each with a different `use_direnv`-loaded environment, and
+their working directories don't disambiguate them, environment injection may
+be silently skipped for some shell calls. The system prompt's "Active
+Session Context" block states this caveat in-band when more than one
+session is concurrently tracked with an environment, so the agent is aware
+injection may not have happened.
+
+This does not affect V1 at all — V1's `shell.env` hook still receives a
+real `sessionID` and injects deterministically.
+
+## Architecture: `core.js` + two adapters
+
+`src/core.js` holds everything runtime-agnostic: session state, the four
+tools' business logic (`executeUseCwd`, `executeUseDirenv`,
+`executeUseWorktree`, `executeUseClear`), the workdir-eligibility JSON-Schema
+predicate, the env-key filter, and the system-prompt block builders.
+`plugin.v1.js` and `plugin.v2.js` are thin adapters that wire each host's
+hook surface onto this shared core and inject host-specific dependencies
+(`$`, a log sink, the base directory).
+
+This structure exists because two independent full-copy entrypoints drift:
+an earlier work-in-progress `plugin.v2.js` (written before this
+architecture) had already silently dropped three spec'd behaviors after a
+single commit (the AGENTS.md advisory block, `use_clear`'s cascading
+cleanup, and a diagnostic log field) — proof that "the same specs hold on
+both runtimes" cannot be an informal expectation on two hand-maintained
+copies; it needs a structure that makes it true by construction.
+
+## Other V2-specific facts
+
+- The built-in `bash` tool is renamed `shell` on V2 — the "always eligible
+  for workdir injection" constant differs per adapter accordingly.
+- V2 tool schemas are always plain JSON Schema — V1's raw-Zod schema-source
+  detection (needed because `parameters` was a raw Zod object on hosts
+  predating opencode 1.14.49) doesn't apply and stays V1-only.
+- V2's plugin `Context` has no shell-exec (`$`) member. The V2 adapter
+  resolves `globalThis.Bun.$` once at `setup()` and fails loudly (a thrown
+  error with an actionable message) if it's absent, rather than failing
+  silently at first tool call. This plugin currently requires a Bun-hosted
+  V2 runtime as a result.
+- A `catalog.updated` event (observed to fire when MCP servers connect)
+  triggers a re-scan of tool schemas for workdir eligibility, guarded against
+  re-entrancy.
+
+## Verification
+
+- Full spec suite (`test/`) runs once against `core.js` via injected fakes —
+  both adapters are covered by construction, not by two separately
+  maintained test files.
+- `test/plugin-v2-conformance.test.js` covers V2-adapter wiring only:
+  `options.codemode: false` on every custom tool, hook mutation shapes, and
+  cleanup disposal.
+- `test/env-resolution-ladder.test.js` covers the V2 shell-env fail-closed
+  ladder in isolation (single-session, cwd-match, and ambiguous cases).
+- `npm run test:e2e` (not part of default `npm test`) runs one real
+  end-to-end check against the actual `@opencode/cli` binary, asserting
+  direct (non-Code-Mode) tool callability and workdir injection — the one
+  failure class invisible to any mock.
+
+**Follow-up needed:** `test:e2e` is not yet wired into CI (`.github/workflows/ci.yml`).
+It requires a real model credential (currently invoked with
+`--model github-copilot/claude-sonnet-5`) and makes a live LLM call, which
+CI runners don't have configured today — adding it needs an explicit
+decision on which credential to provision and whether the cost/flakiness of
+a live-model CI job is acceptable, not a default action. Run it locally
+before releasing changes to `plugin.v2.js` until that decision is made.
+
+## History: the original `opencode-ai@dev` audit (2026-09-15)
+
+Preserved for its still-useful empirical method (testing hooks live against
+a running build rather than inferring compatibility from source alone) and
+because it correctly found a real, unrelated bug (`opencode-openspec`
+crashing against `opencode-ai@dev` — since fixed, see that repo's own
+`v2-compat-audit` PR): all 5 V1 hooks (`tool`, `tool.definition`,
+`tool.execute.before`, `shell.env`, `experimental.chat.system.transform`)
+were confirmed still working on the `opencode-ai@dev` prerelease as of
+`0.0.0-dev-202609142154` (2026-09-14) — this remains true today and is
+unrelated to the real V2 migration documented above. `opencode-ai@dev` is
+V1's own prerelease channel and will presumably keep running V1-shape
+plugins for as long as that channel exists; it says nothing about the real
+V2 product's compatibility.
