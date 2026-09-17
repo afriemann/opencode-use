@@ -723,7 +723,7 @@ export default async function OpenCodeUse({ client, $ }) {
         if (toClear.includes('worktree') && state.worktree) {
           if (state.worktree.owned) {
             const worktreePath = state.worktree.path
-            const root = gitRoot(state, ctx)
+            const root = await resolveGitRoot($, gitRoot(state, ctx), worktreePath, 'use_clear')
             try {
               await (force
                 ? $`git worktree remove --force ${worktreePath}`

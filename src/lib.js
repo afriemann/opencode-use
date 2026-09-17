@@ -104,8 +104,14 @@ async function isPathInsideOrEqual(parent, child) {
  * letting a raw git subprocess error (e.g. "origin does not appear to be a
  * git repository") leak through from a later command run in the wrong place,
  * or — worse — silently running git operations against the wrong repository.
+ *
+ * @param {string} retryTool - The tool name to name in the failure message's
+ *   retry instruction. Callers other than `use_worktree` (e.g. `use_clear`,
+ *   which is trying to remove a worktree, not create one) must pass their own
+ *   tool name so the suggested next step is the one that's actually correct
+ *   for what the caller was trying to do.
  */
-export async function resolveGitRoot($, candidateRoot, resolvedWorktreePath) {
+export async function resolveGitRoot($, candidateRoot, resolvedWorktreePath, retryTool = 'use_worktree') {
   const nearestExisting = await nearestExistingDir(dirname(resolvedWorktreePath))
   for (const cwd of [candidateRoot, nearestExisting]) {
     try {
@@ -120,7 +126,7 @@ export async function resolveGitRoot($, candidateRoot, resolvedWorktreePath) {
     `Cannot determine a git repository for this operation.\n` +
     `  Session git root candidate: '${candidateRoot}' is not inside a git repository.\n` +
     `  Target worktree path's nearest existing ancestor '${nearestExisting}' is not inside one either.\n` +
-    `Call use_cwd('<path-to-the-target-repo>') first, then call use_worktree again.`,
+    `Call use_cwd('<path-to-the-target-repo>') first, then call ${retryTool} again.`,
   )
 }
 
