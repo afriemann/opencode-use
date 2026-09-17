@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { rm, writeFile } from 'node:fs/promises'
 
-import OpenCodeUse from '../src/index.js'
+import OpenCodeUse from '../src/plugin.v1.js'
 import { makeTempDir, makeTempRepo, nodeShellShim, runGit } from './helpers.js'
 
 describe('use_clear resolves the correct repository root for owned worktree removal', () => {

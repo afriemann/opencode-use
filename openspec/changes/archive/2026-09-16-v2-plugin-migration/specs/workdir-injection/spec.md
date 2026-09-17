@@ -1,14 +1,4 @@
-# workdir-injection Specification
-
-## Purpose
-
-Defines how the plugin automatically propagates the session's active working
-directory (set via `use_cwd` / `use_worktree`) and active environment (set via
-`use_direnv`) into subsequent tool calls, without the agent needing to repeat
-itself, and how it informs the agent of this behaviour via tool-schema
-annotation and system-prompt injection.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: System Prompt Session Context
 
