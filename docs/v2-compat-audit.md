@@ -192,3 +192,49 @@ unrelated to the real V2 migration documented above. `opencode-ai@dev` is
 V1's own prerelease channel and will presumably keep running V1-shape
 plugins for as long as that channel exists; it says nothing about the real
 V2 product's compatibility.
+
+## Addendum (2026-09-17): architectural-suitability review — KEEP AS-IS
+
+A later review (separate from the port work above) re-examined this
+plugin's V2 design against opencode V2's real native capabilities, to check
+whether any of `use_worktree`/`use_clear`/`use_direnv` could now be replaced
+by a native domain instead of plugin-owned logic. Two hypotheses were
+investigated and both were **confirmed wrong**, verified directly against
+the real V2 source (`/tmp/opencode/v2-src`, tag `v2.0.6`):
+
+1. **"Native `ctx.worktree`/`ctx.vcs` domains could replace or found
+   `use_worktree`/`use_clear`."** Confirmed wrong: the native worktree
+   domain's `create()` — both the bundled "git" strategy
+   (`packages/core/src/worktree/git.ts`) and the plugin-facing
+   `WorktreeDefinition`/`WorktreeCreateInput` extension point
+   (`packages/plugin/src/worktree.ts`) — **has no concept of creating a new
+   git branch at all**. `WorktreeCreateInput.branch` is documented in-source
+   as "a starting ref, not the name of a new branch," and the bundled
+   strategy hardcodes `git worktree add --detach --`. This plugin's entire
+   purpose (named-branch feature-development workspaces, optionally rebased
+   on a live-detected remote default branch) has no native equivalent.
+   Native `ctx.worktree.list()` also carries no `branch` field, so it
+   can't replace this plugin's own `git worktree list --porcelain` parsing
+   either.
+2. **"Setting `options.permission` on `use_clear`'s destructive removal
+   branch would route it through a native confirmation prompt."** Confirmed
+   wrong, for the same reason found in the parallel `opencode-openspec`
+   review: `options.permission` (verified against
+   `packages/core/src/tool.ts`) only affects wholesale tool-visibility
+   filtering at snapshot time (deny-only, hides the tool from the model's
+   catalog entirely) — it never gates a specific invocation with an
+   ask-prompt, and `ctx.permission.rules(...)` doesn't exist on the real
+   plugin-facing `PermissionDomain` type at all. There is no native
+   mechanism, as of V2 tag `v2.0.6`, for a plugin-registered custom tool to
+   gate its own invocation behind a real confirmation prompt.
+
+A sweep of the remaining native domains (`ctx.storage`, `ctx.command`,
+`ctx.integration`, `ctx.mcp`, `ctx.skill`, `ctx.reference`,
+`ctx.generate.text`) found nothing else applicable to this plugin.
+`use_direnv`'s shell-env-injection approach and the cross-repo
+worktree-contamination guard were reconfirmed as genuinely plugin-unique,
+irreplaceable functionality.
+
+**Conclusion: KEEP AS-IS.** No change to `src/core.js`, `src/lib.js`,
+`src/plugin.v1.js`, or `src/plugin.v2.js` — the plugin's existing
+architecture stands confirmed correct for V2.
