@@ -738,7 +738,7 @@ export async function executeUseClear({ fields, force = false }, state, deps) {
     if (toClear.includes('worktree') && state.worktree) {
       if (state.worktree.owned) {
         const worktreePath = state.worktree.path
-        const root = gitRootFor(state, directory)
+        const root = await resolveGitRoot($, gitRootFor(state, directory), worktreePath, 'use_clear')
         try {
           await (force
             ? $`git worktree remove --force ${worktreePath}`
