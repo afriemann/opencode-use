@@ -132,7 +132,7 @@ describe('plugin.v2.js adapter conformance', () => {
     const { getToolEditor } = await loadPluginWithMockContext()
     const editor = getToolEditor()
     const names = editor.list().map((t) => t.id).filter((id) => id.startsWith('use_'))
-    assert.deepEqual(new Set(names), new Set(['use_cwd', 'use_direnv', 'use_worktree', 'use_clear']))
+    assert.deepEqual(new Set(names), new Set(['use_workdir', 'use_direnv', 'use_worktree', 'use_clear']))
     for (const t of editor.list()) {
       if (!t.id.startsWith('use_')) continue
       assert.equal(t.options?.codemode, false, `${t.id} must set options.codemode: false`)
@@ -172,7 +172,7 @@ describe('plugin.v2.js adapter conformance', () => {
   it('execute.before mutates event.input in place and uses "shell" (not "bash") as the always-eligible built-in', async () => {
     const { registeredHooks, getToolEditor } = await loadPluginWithMockContext()
     const editor = getToolEditor()
-    assert.ok(editor.list().some((t) => t.id === 'use_cwd'))
+    assert.ok(editor.list().some((t) => t.id === 'use_workdir'))
 
     const hook = registeredHooks.tool['execute.before']
     assert.equal(typeof hook, 'function')

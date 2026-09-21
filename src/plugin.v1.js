@@ -21,7 +21,7 @@ import {
   buildActiveSessionContextBlock,
   buildAgentsMdBlock,
   TOOL_TEXT,
-  executeUseCwd,
+  executeUseWorkdir,
   executeUseDirenv,
   executeUseWorktree,
   executeUseClear,
@@ -138,14 +138,14 @@ export default async function OpenCodeUse({ client, $ }) {
   /** @type {Map<string, boolean>} keyed by toolID */
   const workdirCapable = new Map()
 
-  const useCwd = tool({
-    description: TOOL_TEXT.use_cwd.description,
+  const useWorkdir = tool({
+    description: TOOL_TEXT.use_workdir.description,
     args: {
-      path: tool.schema.string().describe(TOOL_TEXT.use_cwd.path),
+      path: tool.schema.string().describe(TOOL_TEXT.use_workdir.path),
     },
     async execute(input, ctx) {
       const state = getState(ctx.sessionID)
-      return executeUseCwd(input, state, { $, log, directory: ctx.directory })
+      return executeUseWorkdir(input, state, { $, log, directory: ctx.directory })
     },
   })
 
@@ -189,7 +189,7 @@ export default async function OpenCodeUse({ client, $ }) {
 
   return {
     tool: {
-      use_cwd: useCwd,
+      use_workdir: useWorkdir,
       use_direnv: useDirenv,
       use_worktree: useWorktree,
       use_clear: useClear,

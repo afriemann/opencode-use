@@ -6,7 +6,7 @@
 // (D4's silent Code-Mode demotion), which is invisible to every mock.
 //
 // Asserts, against a real running opencode V2 process:
-//   1. use_cwd is invoked as a direct native tool call, not via Code Mode.
+//   1. use_workdir is invoked as a direct native tool call, not via Code Mode.
 //   2. A subsequent eligible tool call (the built-in shell tool) receives
 //      the injected `workdir`.
 //   3. The "Active Session Context (opencode-use)" block appears in the
@@ -70,7 +70,7 @@ async function main() {
     const { stdout } = await runOpencode(
       [
         'run',
-        'call use_cwd with path ".", then run the shell tool with command "true" without specifying a workdir argument',
+        'call use_workdir with path ".", then run the shell tool with command "true" without specifying a workdir argument',
         '--print-logs',
         '--log-level',
         'debug',
@@ -88,7 +88,7 @@ async function main() {
       console.error('--- end captured output ---')
     }
 
-    assertDirectToolCall(stdout, 'use_cwd')
+    assertDirectToolCall(stdout, 'use_workdir')
     assertWorkdirInjected(stdout)
 
     console.log('test:e2e PASSED — direct tool call, workdir injection, and clean load all confirmed')
@@ -143,7 +143,7 @@ function assertDirectToolCall(output, toolName) {
   // Raw tool return content is not echoed verbatim in --print-logs output
   // (only the model's own paraphrase is) — success is instead confirmed by
   // assertWorkdirInjected below: workdir-injection only logs when
-  // state.cwd is truthy, which can only be true if use_cwd's execute body
+  // state.cwd is truthy, which can only be true if use_workdir's execute body
   // actually ran and set it.
 }
 

@@ -47,20 +47,20 @@ unaffected. Opting into V2 is an explicit `"./v2"` import.
 custom tools to V2.** A tool registered via `editor.add()` with no
 `options.codemode` set (or `codemode: true`) is **Code-Mode-only**: the
 model can only reach it indirectly, via a separate `execute` JS-execution
-tool (`await tools.use_cwd({...})`), never as a direct native tool call.
+tool (`await tools.use_workdir({...})`), never as a direct native tool call.
 Confirmed empirically against the real `@opencode/cli` 2.0.4 runtime:
 
 ```
-✗ use_cwd {"path":"."} failed
-Error: No tool named "use_cwd" is currently available. Please use a tool from the available tool list.
-⚙ execute {"code":"return await tools.use_cwd({ path: \".\" });"}
+✗ use_workdir {"path":"."} failed
+Error: No tool named "use_workdir" is currently available. Please use a tool from the available tool list.
+⚙ execute {"code":"return await tools.use_workdir({ path: \".\" });"}
 ```
 
 Setting `options: { codemode: false }` on the tool descriptor fixes this —
 the tool becomes directly callable with no fallback:
 
 ```
-⚙ use_cwd {"path":"."}
+⚙ use_workdir {"path":"."}
 ```
 
 `options: { pinned: true }` does **not** fix this (tested — no effect on
@@ -109,7 +109,7 @@ real `sessionID` and injects deterministically.
 ## Architecture: `core.js` + two adapters
 
 `src/core.js` holds everything runtime-agnostic: session state, the four
-tools' business logic (`executeUseCwd`, `executeUseDirenv`,
+tools' business logic (`executeUseWorkdir`, `executeUseDirenv`,
 `executeUseWorktree`, `executeUseClear`), the workdir-eligibility JSON-Schema
 predicate, the env-key filter, and the system-prompt block builders.
 `plugin.v1.js` and `plugin.v2.js` are thin adapters that wire each host's

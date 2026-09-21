@@ -39,7 +39,7 @@ import {
   V2_TOOL_OPTIONS,
   V2_CUSTOM_TOOL_NAMES,
   TOOL_TEXT,
-  executeUseCwd,
+  executeUseWorkdir,
   executeUseDirenv,
   executeUseWorktree,
   executeUseClear,
@@ -104,20 +104,20 @@ export default Plugin.define({
     function toolDescriptors() {
       return [
         {
-          name: 'use_cwd',
-          description: TOOL_TEXT.use_cwd.description,
+          name: 'use_workdir',
+          description: TOOL_TEXT.use_workdir.description,
           input: {
             type: 'object',
             properties: {
-              path: { type: 'string', description: TOOL_TEXT.use_cwd.path },
+              path: { type: 'string', description: TOOL_TEXT.use_workdir.path },
             },
             required: ['path'],
             additionalProperties: false,
           },
-          options: V2_TOOL_OPTIONS.use_cwd,
+          options: V2_TOOL_OPTIONS.use_workdir,
           async execute(input, toolCtx) {
             const state = getState(toolCtx.sessionID)
-            return { content: await executeUseCwd(input, state, deps) }
+            return { content: await executeUseWorkdir(input, state, deps) }
           },
         },
         {

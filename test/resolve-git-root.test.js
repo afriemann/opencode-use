@@ -97,7 +97,7 @@ describe('use_worktree integration', () => {
       $: nodeShellShim,
     })
 
-    // Session with no prior use_cwd call, opened outside a git repository —
+    // Session with no prior use_workdir call, opened outside a git repository —
     // the exact conditions that reproduced the original bug.
     const ctx = { sessionID: 'use-worktree-integration-test', directory: invalidCandidateRoot }
 

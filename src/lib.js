@@ -126,7 +126,7 @@ export async function resolveGitRoot($, candidateRoot, resolvedWorktreePath, ret
     `Cannot determine a git repository for this operation.\n` +
     `  Session git root candidate: '${candidateRoot}' is not inside a git repository.\n` +
     `  Target worktree path's nearest existing ancestor '${nearestExisting}' is not inside one either.\n` +
-    `Call use_cwd('<path-to-the-target-repo>') first, then call ${retryTool} again.`,
+    `Call use_workdir('<path-to-the-target-repo>') first, then call ${retryTool} again.`,
   )
 }
 

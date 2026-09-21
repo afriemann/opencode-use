@@ -51,7 +51,7 @@ export function createSessionStore() {
  * and from workdir/env injection, as defensive coding against ever
  * injecting into the plugin's own tools.
  */
-export const SELF_TOOL_NAMES = new Set(['use_cwd', 'use_direnv', 'use_worktree', 'use_clear'])
+export const SELF_TOOL_NAMES = new Set(['use_workdir', 'use_direnv', 'use_worktree', 'use_clear'])
 
 /**
  * Appended to a workdir-capable tool's `workdir` parameter description.
@@ -366,7 +366,7 @@ export const V2_ENV_INJECTION_CAVEAT =
  * (see plugin.v2.js's registerAndAnnotate).
  */
 export const V2_TOOL_OPTIONS = {
-  use_cwd: { codemode: false },
+  use_workdir: { codemode: false },
   use_direnv: { codemode: false },
   use_worktree: { codemode: false },
   use_clear: { codemode: false },
@@ -375,7 +375,7 @@ export const V2_TOOL_OPTIONS = {
 export const V2_CUSTOM_TOOL_NAMES = Object.keys(V2_TOOL_OPTIONS)
 
 export const TOOL_TEXT = {
-  use_cwd: {
+  use_workdir: {
     description:
       'Set the active working directory for this session. ' +
       'The plugin automatically injects this as workdir into every tool call that accepts a ' +
@@ -404,7 +404,7 @@ export const TOOL_TEXT = {
       'STOP and ask the user to run `direnv allow` in that directory before calling this again — ' +
       'do not proceed without user approval. ' +
       'This tool only loads the environment — it never changes the session\'s active working directory; ' +
-      'call use_cwd separately if you also need to move there. ' +
+      'call use_workdir separately if you also need to move there. ' +
       'Returns: "Loaded N variable(s): name1, name2, …" or "direnv loaded — no environment changes exported".',
     path: 'Directory containing the .envrc file to load (a leading ~ or ~/... expands to the home directory)',
   },
@@ -422,9 +422,9 @@ export const TOOL_TEXT = {
       'Cross-repo contamination guard: when reusing an existing worktree, the tool verifies the worktree belongs to the same repository as the current session; if it does not (e.g. a prior session placed a different repo\'s worktree at the same path), an error is raised describing the mismatch and the cleanup command. ' +
       'If the same path is already the active worktree for this session, returns a no-op message. ' +
       'Relative paths resolve against the project directory first, then the current active working directory as fallback. ' +
-      'Git operations run against the active working directory if set (via a prior use_cwd call), ' +
+      'Git operations run against the active working directory if set (via a prior use_workdir call), ' +
       'falling back to the session git root and then the project directory — ' +
-      'call use_cwd with the target repo path first if opencode was opened outside a git repo. ' +
+      'call use_workdir with the target repo path first if opencode was opened outside a git repo. ' +
       'STOP if a *different* worktree is already active for this session — call use_clear (fields: ["cwd", "worktree"]) ' +
       'to remove it first, then call use_worktree again. ' +
       'Cannot use the repository root itself as the worktree path — always specify a subdirectory (e.g. .worktrees/<branch>). ' +
@@ -482,7 +482,7 @@ export const TOOL_TEXT = {
  */
 
 /** @param {{ path: string }} input @param {SessionState} state @param {ToolDeps} deps */
-export async function executeUseCwd({ path }, state, deps) {
+export async function executeUseWorkdir({ path }, state, deps) {
   const { $, log, directory } = deps
   try {
     const resolved = resolvePath(path, directory, state.cwd)
@@ -491,7 +491,7 @@ export async function executeUseCwd({ path }, state, deps) {
     const { notes } = await applyDirectoryChange($, state, resolved, log)
     return withNotes(`Working directory set to: ${resolved}`, notes)
   } catch (err) {
-    log('use_cwd failed', err)
+    log('use_workdir failed', err)
     throw err
   }
 }

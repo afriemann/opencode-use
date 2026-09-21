@@ -347,14 +347,14 @@ describe('applyDirectoryChange', () => {
   })
 })
 
-describe('use_cwd integration', () => {
-  it('use_cwd moves to a genuinely new directory triggers discovery', async (t) => {
+describe('use_workdir integration', () => {
+  it('use_workdir moves to a genuinely new directory triggers discovery', async (t) => {
     const plugin = await makePlugin()
     const sessionID = uniqueSessionId()
     const repoRoot = await makeTempRepo(t, 'ucwd-')
     await writeFile(join(repoRoot, 'AGENTS.md'), '# Repo\n')
 
-    const result = await plugin.tool.use_cwd.execute(
+    const result = await plugin.tool.use_workdir.execute(
       { path: repoRoot },
       { sessionID, directory: repoRoot },
     )
@@ -363,14 +363,14 @@ describe('use_cwd integration', () => {
     assert.match(result, /Loaded AGENTS\.md from/)
   })
 
-  it('use_cwd is called again with the same resolved directory', async (t) => {
+  it('use_workdir is called again with the same resolved directory', async (t) => {
     const plugin = await makePlugin()
     const sessionID = uniqueSessionId()
     const repoRoot = await makeTempRepo(t, 'ucwd-repeat-')
     await writeFile(join(repoRoot, 'AGENTS.md'), '# Repo\n')
 
-    await plugin.tool.use_cwd.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
-    const second = await plugin.tool.use_cwd.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
+    await plugin.tool.use_workdir.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
+    const second = await plugin.tool.use_workdir.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
 
     assert.doesNotMatch(second, /Loaded AGENTS\.md from/)
   })
@@ -412,9 +412,9 @@ describe('use_worktree integration (reuse paths)', () => {
       { sessionID, directory: repoRoot },
     )
 
-    // Move cwd elsewhere via use_cwd.
+    // Move cwd elsewhere via use_workdir.
     const otherDir = await makeTempDir(t, 'uwt-moved-other-')
-    await plugin.tool.use_cwd.execute({ path: otherDir }, { sessionID, directory: otherDir })
+    await plugin.tool.use_workdir.execute({ path: otherDir }, { sessionID, directory: otherDir })
 
     // Calling use_worktree again with the SAME worktree path/branch hits the
     // idempotent early-return branch (state.worktree.path === resolved),
@@ -479,7 +479,7 @@ describe('Advisory system-prompt injection (integration)', () => {
     const repoRoot = await makeTempRepo(t, 'prompt-present-')
     await writeFile(join(repoRoot, 'AGENTS.md'), '# Hello from repo\n')
 
-    await plugin.tool.use_cwd.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
+    await plugin.tool.use_workdir.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
 
     const output = { system: [] }
     await plugin['experimental.chat.system.transform']({ sessionID }, output)
@@ -497,7 +497,7 @@ describe('Advisory system-prompt injection (integration)', () => {
     const sessionID = uniqueSessionId()
     const repoRoot = await makeTempRepo(t, 'prompt-absent-')
 
-    await plugin.tool.use_cwd.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
+    await plugin.tool.use_workdir.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
 
     const output = { system: [] }
     await plugin['experimental.chat.system.transform']({ sessionID }, output)
@@ -511,7 +511,7 @@ describe('Advisory system-prompt injection (integration)', () => {
     const repoRoot = await makeTempRepo(t, 'prompt-fence-')
     await writeFile(join(repoRoot, 'AGENTS.md'), 'before\n````\nafter\n')
 
-    await plugin.tool.use_cwd.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
+    await plugin.tool.use_workdir.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
 
     const output = { system: [] }
     await plugin['experimental.chat.system.transform']({ sessionID }, output)
@@ -530,7 +530,7 @@ describe('Advisory system-prompt injection (integration)', () => {
     const repoRoot = await makeTempRepo(t, 'prompt-fence-trailing-ws-')
     await writeFile(join(repoRoot, 'AGENTS.md'), 'before\n```   \nafter\n')
 
-    await plugin.tool.use_cwd.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
+    await plugin.tool.use_workdir.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
 
     const output = { system: [] }
     await plugin['experimental.chat.system.transform']({ sessionID }, output)
@@ -548,8 +548,8 @@ describe('Advisory system-prompt injection (integration)', () => {
     const repoRootB = await makeTempRepo(t, 'prompt-replace-b-')
     await writeFile(join(repoRootB, 'AGENTS.md'), '# Repo B content\n')
 
-    await plugin.tool.use_cwd.execute({ path: repoRootA }, { sessionID, directory: repoRootA })
-    await plugin.tool.use_cwd.execute({ path: repoRootB }, { sessionID, directory: repoRootB })
+    await plugin.tool.use_workdir.execute({ path: repoRootA }, { sessionID, directory: repoRootA })
+    await plugin.tool.use_workdir.execute({ path: repoRootB }, { sessionID, directory: repoRootB })
 
     const output = { system: [] }
     await plugin['experimental.chat.system.transform']({ sessionID }, output)
@@ -565,7 +565,7 @@ describe('use_clear clears auto-loaded repository context', () => {
     const sessionID = uniqueSessionId()
     const repoRoot = await makeTempRepo(t, 'clear-cwd-')
     await writeFile(join(repoRoot, 'AGENTS.md'), '# Repo\n')
-    await plugin.tool.use_cwd.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
+    await plugin.tool.use_workdir.execute({ path: repoRoot }, { sessionID, directory: repoRoot })
 
     const result = await plugin.tool.use_clear.execute({ fields: ['cwd'] }, { sessionID, directory: repoRoot })
 
@@ -580,7 +580,7 @@ describe('use_clear clears auto-loaded repository context', () => {
     const plugin = await makePlugin()
     const sessionID = uniqueSessionId()
     const dir = await makeTempDir(t, 'clear-no-context-')
-    await plugin.tool.use_cwd.execute({ path: dir }, { sessionID, directory: dir })
+    await plugin.tool.use_workdir.execute({ path: dir }, { sessionID, directory: dir })
 
     const result = await plugin.tool.use_clear.execute({ fields: ['cwd'] }, { sessionID, directory: dir })
 
@@ -616,7 +616,7 @@ describe('use_direnv no longer changes the session active directory', () => {
     const sessionID = uniqueSessionId()
     const cwdDir = await makeTempDir(t, 'direnv-nocwd-cwd-')
     const otherDir = await makeTempDir(t, 'direnv-nocwd-other-')
-    await plugin.tool.use_cwd.execute({ path: cwdDir }, { sessionID, directory: cwdDir })
+    await plugin.tool.use_workdir.execute({ path: cwdDir }, { sessionID, directory: cwdDir })
 
     await plugin.tool.use_direnv.execute({ path: otherDir, changeCwd: true }, { sessionID, directory: cwdDir })
 
