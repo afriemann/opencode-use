@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines how the `use_cwd`, `use_direnv`, and `use_worktree` tools resolve the
+Defines how the `use_workdir`, `use_direnv`, and `use_worktree` tools resolve the
 `path` argument a caller supplies into a concrete filesystem path, before any
 further validation (e.g. "must be a directory", "must exist") or use of that
 path runs.

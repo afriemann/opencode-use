@@ -2,7 +2,7 @@
 
 ## Purpose
 Automatically discovers a target repository's `AGENTS.md` and `.envrc`
-presence whenever `use_cwd` or `use_worktree` moves the session's active
+presence whenever `use_workdir` or `use_worktree` moves the session's active
 directory to a genuinely new path, injecting the found `AGENTS.md` content
 into the system prompt as clearly-labeled advisory context and reminding the
 agent to load `.envrc` explicitly, without ever executing it automatically.
@@ -20,13 +20,13 @@ identical to the session's current `state.cwd`, the plugin SHALL still assign
 or read any file for this purpose, and SHALL NOT append any repository-context
 note to the tool's return value.
 
-#### Scenario: use_cwd moves to a genuinely new directory
+#### Scenario: use_workdir moves to a genuinely new directory
 
 - GIVEN a session whose current `state.cwd` differs from the path passed to `use_workdir`
 - WHEN `use_workdir` resolves and validates the new path
 - THEN the plugin runs repository-context discovery for the resolved directory
 
-#### Scenario: use_cwd is called again with the same resolved directory
+#### Scenario: use_workdir is called again with the same resolved directory
 
 - GIVEN a session whose current `state.cwd` already equals the resolved path passed to `use_workdir`
 - WHEN `use_workdir` is called again with that same path
@@ -193,7 +193,6 @@ the underlying hook mechanism differs.
 - GIVEN a session with stored `AGENTS.md` content from a previously discovered repository
 - WHEN a subsequent directory change causes discovery to find a different (or no) `AGENTS.md`
 - THEN the system prompt reflects only the new content (or no block at all), and never both the previous and the new content together
-</content>
 
 ### Requirement: .envrc Detection Reminder
 
