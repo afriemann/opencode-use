@@ -12,7 +12,7 @@ agent to load `.envrc` explicitly, without ever executing it automatically.
 ### Requirement: Directory-Change Detection Gate
 
 The plugin SHALL perform repository-context discovery (`AGENTS.md` search and
-`.envrc` detection) only when a call to `use_cwd`, or any of `use_worktree`'s
+`.envrc` detection) only when a call to `use_workdir`, or any of `use_worktree`'s
 three success paths, resolves to a directory that differs from the session's
 current `state.cwd` at the time of the call. When the resolved directory is
 identical to the session's current `state.cwd`, the plugin SHALL still assign
@@ -22,14 +22,14 @@ note to the tool's return value.
 
 #### Scenario: use_cwd moves to a genuinely new directory
 
-- GIVEN a session whose current `state.cwd` differs from the path passed to `use_cwd`
-- WHEN `use_cwd` resolves and validates the new path
+- GIVEN a session whose current `state.cwd` differs from the path passed to `use_workdir`
+- WHEN `use_workdir` resolves and validates the new path
 - THEN the plugin runs repository-context discovery for the resolved directory
 
 #### Scenario: use_cwd is called again with the same resolved directory
 
-- GIVEN a session whose current `state.cwd` already equals the resolved path passed to `use_cwd`
-- WHEN `use_cwd` is called again with that same path
+- GIVEN a session whose current `state.cwd` already equals the resolved path passed to `use_workdir`
+- WHEN `use_workdir` is called again with that same path
 - THEN the plugin does not run repository-context discovery and appends no repository-context note to the return value
 
 #### Scenario: use_worktree's idempotent same-path return does not repeat discovery
@@ -40,7 +40,7 @@ note to the tool's return value.
 
 #### Scenario: use_worktree's idempotent same-path return fires after the directory moved elsewhere
 
-- GIVEN a session where `use_worktree` previously created a worktree at a path, and a later `use_cwd` call moved `state.cwd` to a different directory
+- GIVEN a session where `use_worktree` previously created a worktree at a path, and a later `use_workdir` call moved `state.cwd` to a different directory
 - WHEN `use_worktree` is called again with the original worktree's path and branch, triggering the idempotent same-path early return
 - THEN the plugin runs repository-context discovery for the worktree path, because it now differs from the session's current `state.cwd`
 
