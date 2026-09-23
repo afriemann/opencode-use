@@ -21,7 +21,12 @@ target. If `resolveGitRoot` cannot determine a containing repository, the
 tool SHALL propagate its error instead of attempting removal against a
 directory guessed from raw session context. On success, the tool SHALL clear
 the session's worktree reference and, if the session's working directory
-pointed at the removed worktree, clear that too.
+pointed at the removed worktree, clear that too. On the V2 runtime, this
+requirement applies identically whether the session's worktree reference was
+set within the current process or restored from a validated, persisted
+ownership record after a process restart — a worktree owned by a session in
+an earlier process is removed exactly as if it had been created within the
+current one.
 
 #### Scenario: Owned worktree removed successfully
 
@@ -46,6 +51,12 @@ pointed at the removed worktree, clear that too.
 - GIVEN an owned worktree whose containing repository directory no longer exists on disk, and the session's current working directory and invoking directory do not resolve to any git repository either
 - WHEN `use_clear` is called with `fields: ["worktree"]`
 - THEN the tool raises `resolveGitRoot`'s own error describing that no containing repository could be determined, instead of attempting a `git worktree remove` call against a guessed directory
+
+#### Scenario: Owned worktree restored from a persisted record after a restart is removed normally
+
+- GIVEN a V2 session whose worktree ownership record was restored from durable storage (via eager hydration and ground-truth validation) after a process restart, rather than set within the current process
+- WHEN `use_clear` is called with `fields: ["worktree"]` for that session
+- THEN `git worktree remove` succeeds against the restored path exactly as it would for a worktree created within the current process, and both the session's in-memory worktree reference and its persisted ownership record are cleared
 
 ### Requirement: Force-Clearing An Unregistered Worktree Path
 
