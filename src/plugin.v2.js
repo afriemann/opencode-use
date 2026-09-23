@@ -10,6 +10,9 @@
 //   tool.execute.before                    ctx.tool.hook("execute.before", ...)
 //   shell.env                              ctx.shell.hook("create.before", ...)
 //   experimental.chat.system.transform      ctx.session.hook("context", ...)
+//   (none — V1 has no equivalent)          ctx.event.subscribe() session.deleted branch (D9):
+//                                             removes a deleted session's persisted worktree
+//                                             ownership key from ctx.storage (never the worktree itself)
 //
 // Key differences from V1 (see design.md D2–D8 for the full analysis):
 //   - Tool schemas are ALWAYS plain JSON Schema — no raw-Zod source exists.
@@ -27,6 +30,7 @@
 import { Plugin } from '@opencode/plugin'
 import {
   createSessionStore,
+  createWorktreePersistence,
   SELF_TOOL_NAMES,
   isEligibleJsonSchemaProp,
   annotateJsonSchemaProp,
@@ -94,6 +98,20 @@ export default Plugin.define({
 
     const deps = { $, log, directory }
 
+    // -----------------------------------------------------------------------
+    // Worktree ownership persistence (design.md D1-D9): capability-detect
+    // ctx.storage, then eagerly hydrate — fully awaited — before any tool or
+    // hook is registered (D3). `persistence` is `null` when ctx.storage is
+    // absent or incomplete; every downstream call site degrades silently.
+    // -----------------------------------------------------------------------
+
+    const persistence = createWorktreePersistence(ctx.storage)
+    if (!persistence) {
+      log('worktree ownership persistence disabled — ctx.storage is not fully available')
+    } else {
+      await persistence.hydrate({ sessions, $, log })
+    }
+
     /** @type {Map<string, boolean>} keyed by effective tool id (see D8) */
     const workdirCapable = new Map()
 
@@ -155,7 +173,8 @@ export default Plugin.define({
           options: V2_TOOL_OPTIONS.use_worktree,
           async execute(input, toolCtx) {
             const state = getState(toolCtx.sessionID)
-            return { content: await executeUseWorktree(input, state, deps) }
+            const callDeps = { ...deps, persistWorktree: persistence?.forSession(toolCtx.sessionID) }
+            return { content: await executeUseWorktree(input, state, callDeps) }
           },
         },
         {
@@ -176,7 +195,8 @@ export default Plugin.define({
           options: V2_TOOL_OPTIONS.use_clear,
           async execute(input, toolCtx) {
             const state = getState(toolCtx.sessionID)
-            return { content: await executeUseClear(input, state, deps) }
+            const callDeps = { ...deps, persistWorktree: persistence?.forSession(toolCtx.sessionID) }
+            return { content: await executeUseClear(input, state, callDeps) }
           },
         },
       ]
@@ -240,7 +260,9 @@ export default Plugin.define({
     })
 
     // -----------------------------------------------------------------------
-    // Catalog re-scan on mcp.tools.changed (D7), with a re-entrancy guard
+    // Event subscription: catalog re-scan on mcp.tools.changed (D7), with a
+    // re-entrancy guard, and worktree-ownership retention on session.deleted
+    // (design.md D9) — one subscription, one AbortController, shared by both.
     // -----------------------------------------------------------------------
     //
     // Corrected from an earlier draft's `catalog.updated`, which does not
@@ -257,6 +279,14 @@ export default Plugin.define({
     ;(async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: abortController.signal })) {
+          if (event?.type === 'session.deleted') {
+            try {
+              await persistence?.forSession(event.sessionID).remove()
+            } catch (err) {
+              log('session.deleted cleanup failed', err)
+            }
+            continue
+          }
           if (event?.type !== 'mcp.tools.changed') continue
           if (reloadInFlight) continue // re-entrancy guard: a reload already in flight
           reloadInFlight = true

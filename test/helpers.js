@@ -90,3 +90,57 @@ export async function makeTempRepo(t, prefix) {
   await runGit('commit --allow-empty -q -m init', dir)
   return dir
 }
+
+/**
+ * A minimal, in-memory stand-in for opencode V2's `ctx.storage` (design.md
+ * D7): async `get`/`set`/`remove`, plus a prefix-filtered, key-ordered,
+ * paginated `scan`. `set()` JSON round-trips its value (via
+ * `structuredClone`) so a non-JSON-serialisable record fails here, in a
+ * test, rather than silently in production.
+ *
+ * @param {Map<string, any>} [backing] - shared, mutable backing store; pass
+ *   the same Map into a second `makeFakeStorage` call to simulate a second
+ *   process reading the same persisted data.
+ * @param {{ scanLimit?: number }} [options]
+ */
+export function makeFakeStorage(backing = new Map(), { scanLimit } = {}) {
+  const storage = {
+    async get(key) {
+      return backing.has(key) ? structuredClone(backing.get(key)) : undefined
+    },
+    async set(key, value) {
+      backing.set(key, structuredClone(value))
+    },
+    async remove(key) {
+      backing.delete(key)
+    },
+    async scan({ prefix, after, limit = scanLimit }) {
+      const keys = [...backing.keys()].filter((k) => k.startsWith(prefix)).sort()
+      const startIndex = after ? keys.findIndex((k) => k > after) : 0
+      const page = limit ? keys.slice(startIndex, startIndex + limit) : keys.slice(startIndex)
+      const entries = page.map((key) => ({ key, value: structuredClone(backing.get(key)) }))
+      const next = limit && startIndex + limit < keys.length ? page[page.length - 1] : undefined
+      return { entries, next }
+    },
+  }
+  return { storage, backing }
+}
+
+/**
+ * Wraps `makeFakeStorage` with fault injection: any method named in
+ * `failOn` rejects instead of completing (design.md D4/D7's fault-injecting
+ * fake storage).
+ *
+ * @param {Map<string, any>} [backing]
+ * @param {{ failOn: string[] }} options
+ */
+export function makeFailingStorage(backing = new Map(), { failOn = [] } = {}) {
+  const { storage: base } = makeFakeStorage(backing)
+  const storage = { ...base }
+  for (const method of failOn) {
+    storage[method] = async () => {
+      throw new Error(`simulated ${method} failure`)
+    }
+  }
+  return { storage, backing }
+}

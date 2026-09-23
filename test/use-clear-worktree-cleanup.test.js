@@ -1,11 +1,18 @@
 // spec: openspec/changes/fix-use-clear-worktree-prune/specs/worktree-cleanup/spec.md
+// spec: openspec/changes/persist-session-state-v2-storage/specs/worktree-cleanup/spec.md
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { rm, writeFile } from 'node:fs/promises'
 
 import OpenCodeUse from '../src/plugin.v1.js'
-import { makeTempDir, makeTempRepo, nodeShellShim, runGit } from './helpers.js'
+import {
+  createSessionStore,
+  createWorktreePersistence,
+  executeUseWorktree,
+  executeUseClear,
+} from '../src/core.js'
+import { makeTempDir, makeTempRepo, nodeShellShim, runGit, makeFakeStorage } from './helpers.js'
 
 describe('use_clear resolves the correct repository root for owned worktree removal', () => {
   it('session context points at a different repository than the worktree', async (t) => {
@@ -119,5 +126,39 @@ describe('use_clear removal fails due to uncommitted or untracked content', () =
 
     const list = (await runGit('worktree list --porcelain', repo)).trim()
     assert.ok(list.includes(worktreePath), 'worktree must remain registered after a failed removal')
+  })
+})
+
+describe('Owned Worktree Removal — persisted-record restoration (design.md D3, worktree-ownership-persistence)', () => {
+  it('Owned worktree restored from a persisted record after a restart is removed normally', async (t) => {
+    const repo = await makeTempRepo(t, 'ucwr-restored-')
+    const worktreePath = join(repo, '.worktrees', 'target-branch')
+    const backing = new Map()
+    const sessionID = 'ucwr-restored-session'
+
+    // "Process 1": creates the worktree, persisting its ownership record.
+    {
+      const { storage } = makeFakeStorage(backing)
+      const persistence = createWorktreePersistence(storage)
+      const state = { cwd: null, env: {}, envSource: null, worktree: null, agentsMd: null }
+      const deps = { $: nodeShellShim, log: () => {}, directory: repo, persistWorktree: persistence.forSession(sessionID) }
+      await executeUseWorktree({ path: worktreePath, branch: 'target-branch', create: true, fromRemote: false }, state, deps)
+    }
+
+    // "Process 2" (post-restart): hydrates from the same persisted data, then removes normally.
+    const { sessions, getState } = createSessionStore()
+    const { storage } = makeFakeStorage(backing)
+    const persistence = createWorktreePersistence(storage)
+    await persistence.hydrate({ sessions, $: nodeShellShim, log: () => {} })
+
+    const restoredState = getState(sessionID)
+    assert.deepEqual(restoredState.worktree, { path: worktreePath, owned: true })
+
+    const deps = { $: nodeShellShim, log: () => {}, directory: repo, persistWorktree: persistence.forSession(sessionID) }
+    const result = await executeUseClear({ fields: ['worktree'] }, restoredState, deps)
+
+    assert.match(result, /^Removed owned worktree at/)
+    const list = (await runGit('worktree list --porcelain', repo)).trim()
+    assert.ok(!list.includes(worktreePath), 'worktree must be deregistered from git')
   })
 })

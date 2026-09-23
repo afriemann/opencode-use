@@ -16,6 +16,7 @@ import {
   resolveGitRoot,
   listWorktrees,
   applyDirectoryChange,
+  isSamePath,
 } from './lib.js'
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,244 @@ export const WORKDIR_ANNOTATION =
   ' plugin after you submitted that call, not set by you — write your next call without it.' +
   ' Exception: set this explicitly if you intentionally need a different directory for this' +
   ' one specific call — your value will be honored for that call only.'
+
+// ---------------------------------------------------------------------------
+// Worktree ownership persistence (V2 only — see design.md D1-D9)
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {{
+ *   get(key: string): Promise<any|undefined>,
+ *   set(key: string, value: any): Promise<void>,
+ *   remove(key: string): Promise<void>,
+ *   scan(opts: { prefix: string, after?: string, limit?: number }):
+ *     Promise<{ entries: { key: string, value: any }[], next?: string }>,
+ * }} StorageAdapter
+ */
+
+/**
+ * @typedef {{ schema: number, sessionID: string, path: string, branch: string, repoRoot: string, owned: boolean, createdAt: string }} WorktreeRecord
+ */
+
+/** Schema version lives in the key path, not only the record body (design.md D2). */
+const WORKTREE_KEY_PREFIX = 'worktree/v1/'
+const WORKTREE_RECORD_SCHEMA = 1
+
+/**
+ * Bounds hydration's git-validation phase so a hung `git worktree list`
+ * (an NFS mount, a corrupt repo) cannot block plugin `setup()` and
+ * therefore opencode's own startup (design.md D4, Open Question 4).
+ */
+export const HYDRATION_TIMEOUT_MS = 5000
+
+function worktreeKey(sessionID) {
+  return `${WORKTREE_KEY_PREFIX}${sessionID}`
+}
+
+/** Whether `storage` offers the complete four-method surface — never assumed, never throws (design.md D4). */
+function hasFullStorageSurface(storage) {
+  return Boolean(storage) && ['get', 'set', 'remove', 'scan'].every((m) => typeof storage[m] === 'function')
+}
+
+/** Structural validation of a persisted record, before any part of it is trusted. */
+function isValidWorktreeRecordShape(value) {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    value.schema === WORKTREE_RECORD_SCHEMA &&
+    typeof value.sessionID === 'string' &&
+    typeof value.path === 'string' &&
+    typeof value.branch === 'string' &&
+    typeof value.repoRoot === 'string' &&
+    typeof value.owned === 'boolean',
+  )
+}
+
+/**
+ * Factory over a raw JSON key/value adapter (design.md D1) that owns the key
+ * scheme, record shape, hydration, and ground-truth validation for V2
+ * worktree-ownership persistence. `core.js` never imports a host API — the
+ * adapter is injected, so this factory stays host-agnostic; `plugin.v2.js`
+ * is the only caller that knows about `ctx.storage`.
+ *
+ * Returns `null` when `storage` does not offer the complete four-method
+ * surface: every call site degrades to exactly today's in-memory-only
+ * behaviour via the `?.` operator, never throwing (design.md D4).
+ *
+ * @param {StorageAdapter|undefined|null} storage
+ */
+export function createWorktreePersistence(storage) {
+  if (!hasFullStorageSurface(storage)) return null
+
+  /** Per-sessionID FIFO chain (design.md D6) — keeps concurrent save/remove calls for one session ordered. */
+  const chains = new Map()
+
+  function enqueue(sessionID, task) {
+    const prior = chains.get(sessionID) ?? Promise.resolve()
+    const settled = prior.then(task, task)
+    const tracked = settled.finally(() => {
+      if (chains.get(sessionID) === tracked) chains.delete(sessionID)
+    })
+    chains.set(sessionID, tracked)
+    return tracked
+  }
+
+  /**
+   * @param {string} sessionID
+   * @returns {{ save(partial: { path: string, branch: string, repoRoot: string, owned: boolean }): Promise<{ok: boolean, error?: Error}>, remove(): Promise<void> }}
+   */
+  function forSession(sessionID) {
+    const key = worktreeKey(sessionID)
+    return {
+      save(partial) {
+        return enqueue(sessionID, async () => {
+          try {
+            /** @type {WorktreeRecord} */
+            const record = {
+              schema: WORKTREE_RECORD_SCHEMA,
+              sessionID,
+              path: partial.path,
+              branch: partial.branch,
+              repoRoot: partial.repoRoot,
+              owned: partial.owned,
+              createdAt: new Date().toISOString(),
+            }
+            await storage.set(key, record)
+            return { ok: true }
+          } catch (error) {
+            return { ok: false, error }
+          }
+        })
+      },
+      remove() {
+        return enqueue(sessionID, async () => {
+          try {
+            await storage.remove(key)
+          } catch {
+            // Best-effort: nothing awaits removal's success (design.md D9);
+            // a failed removal simply leaves an inert key behind.
+          }
+        })
+      },
+    }
+  }
+
+  async function scanAll() {
+    const entries = []
+    let after
+    for (;;) {
+      const page = await storage.scan({ prefix: WORKTREE_KEY_PREFIX, after })
+      entries.push(...page.entries)
+      if (!page.next) break
+      after = page.next
+    }
+    return entries
+  }
+
+  async function removeKeySafely(key) {
+    try {
+      await storage.remove(key)
+    } catch {
+      // Best-effort: an invalid record we couldn't delete now will simply
+      // fail shape validation again on the next start.
+    }
+  }
+
+  /** Validates one repository's group of candidate records against `git worktree list`, restoring matches into `sessions`. Every mutation is gated on `guard.cancelled` so a validation that resolves after `hydrate()` has already given up on the timeout budget becomes a pure no-op — it must never mutate `sessions` or `counts` after that point (design.md D4). */
+  async function validateRepoGroup({ repoRoot, records, sessions, $, counts, guard }) {
+    let worktrees
+    try {
+      worktrees = await listWorktrees($, repoRoot)
+    } catch {
+      if (guard.cancelled) return
+      // Repository unreadable — every record in this group is skipped, not
+      // deleted (design.md D3): discarding the record that reproduced the
+      // original bug is exactly what this behaviour must avoid.
+      counts.skipped += records.length
+      return
+    }
+    if (guard.cancelled) return
+
+    for (const { key, record } of records) {
+      if (guard.cancelled) return
+      let matched = false
+      for (const wt of worktrees) {
+        if (wt.branch !== `refs/heads/${record.branch}`) continue
+        if (await isSamePath(wt.path, record.path)) {
+          matched = true
+          break
+        }
+      }
+      if (guard.cancelled) return
+      if (!matched) {
+        await removeKeySafely(key)
+        counts.dropped += 1
+        continue
+      }
+      sessions.set(record.sessionID, {
+        cwd: null,
+        env: {},
+        envSource: null,
+        worktree: { path: record.path, owned: record.owned },
+        agentsMd: null,
+      })
+      counts.restored += 1
+    }
+  }
+
+  /**
+   * Scans every persisted worktree record, validates its shape, groups
+   * valid records by repository, and confirms each group against git's own
+   * worktree registration before trusting it (design.md D3). Never throws
+   * and never blocks `setup()` past `HYDRATION_TIMEOUT_MS`. A validation
+   * still in flight when the budget is exceeded is not cancelled (there is
+   * no way to abort a running git subprocess mid-call) but is `guard`ed so
+   * it can no longer mutate `sessions` or `counts` once this function has
+   * already returned to its caller.
+   *
+   * @param {{ sessions: Map<string, SessionState>, $: any, log: (msg: string, err?: any) => void }} params
+   * @returns {Promise<{ restored: number, dropped: number, skipped: number }>}
+   */
+  async function hydrate({ sessions, $, log }) {
+    const counts = { restored: 0, dropped: 0, skipped: 0 }
+    const guard = { cancelled: false }
+    try {
+      const scanned = await scanAll()
+      const byRepoRoot = new Map()
+      for (const { key, value } of scanned) {
+        if (!isValidWorktreeRecordShape(value)) {
+          await removeKeySafely(key)
+          counts.dropped += 1
+          continue
+        }
+        const group = byRepoRoot.get(value.repoRoot) ?? []
+        group.push({ key, record: value })
+        byRepoRoot.set(value.repoRoot, group)
+      }
+
+      const validation = Promise.allSettled(
+        [...byRepoRoot.entries()].map(([repoRoot, records]) =>
+          validateRepoGroup({ repoRoot, records, sessions, $, counts, guard }),
+        ),
+      )
+      const timeout = new Promise((resolvePromise) => setTimeout(resolvePromise, HYDRATION_TIMEOUT_MS))
+      const outcome = await Promise.race([validation.then(() => 'done'), timeout.then(() => 'timeout')])
+      if (outcome === 'timeout') {
+        guard.cancelled = true
+        log(
+          `hydration: exceeded ${HYDRATION_TIMEOUT_MS}ms budget — remaining records left unvalidated ` +
+          `(neither restored nor deleted; retried on a future start)`,
+        )
+      }
+    } catch (err) {
+      log('hydration failed', err)
+    }
+    log(`hydration summary: restored=${counts.restored} dropped=${counts.dropped} skipped=${counts.skipped}`)
+    return counts
+  }
+
+  return { forSession, hydrate }
+}
 
 // ---------------------------------------------------------------------------
 // Workdir-eligibility predicate (JSON-Schema shape only — see design.md D3)
@@ -165,6 +404,25 @@ export function computeFenceLength(content) {
 /** Append notes (if any) to a primary return message, newline-separated. */
 export function withNotes(primary, notes) {
   return notes.length > 0 ? [primary, ...notes].join('\n') : primary
+}
+
+/**
+ * Persists a worktree ownership record via `deps.persistWorktree` (bound
+ * per-session by the V2 adapter's `forSession`, absent on V1 and whenever
+ * durable storage is unavailable) and returns a disclosure note when the
+ * save failed, so the caller can surface it via `withNotes` without failing
+ * the tool call itself (design.md D5).
+ *
+ * @param {ToolDeps} deps
+ * @param {{ path: string, branch: string, repoRoot: string, owned: boolean }} record
+ * @returns {Promise<string[]>}
+ */
+async function persistWorktreeOwnership(deps, record) {
+  const result = await deps.persistWorktree?.save(record)
+  if (result && !result.ok) {
+    return ['Note: worktree ownership could not be persisted and will not survive a restart.']
+  }
+  return []
 }
 
 // ---------------------------------------------------------------------------
@@ -657,11 +915,12 @@ export async function executeUseWorktree({ path, branch, create = false, fromRem
             throw new Error(`git worktree add failed: ${retryErr.stderr ?? retryErr.message}`)
           }
           state.worktree = { path: resolved, owned: true }
+          const persistNotes = await persistWorktreeOwnership(deps, { path: resolved, branch, repoRoot: root, owned: true })
           const { notes } = await applyDirectoryChange($, state, resolved, log)
           return withNotes(
             `Worktree created at ${resolved} on branch '${branch}' (existing branch checked out). ` +
             `Active working directory set to ${resolved}. Repository root: ${root}.`,
-            notes,
+            [...notes, ...persistNotes],
           )
         }
       }
@@ -688,20 +947,22 @@ export async function executeUseWorktree({ path, branch, create = false, fromRem
                 )
               } else {
                 state.worktree = { path: resolved, owned: false }
+                const persistNotes = await persistWorktreeOwnership(deps, { path: resolved, branch, repoRoot: root, owned: false })
                 const { notes } = await applyDirectoryChange($, state, resolved, log)
                 return withNotes(
                   `Worktree at ${resolved} on branch '${branch}' already exists — reusing it. ` +
                   `Active working directory set to ${resolved}. Repository root: ${root}.`,
-                  notes,
+                  [...notes, ...persistNotes],
                 )
               }
             } catch {
               state.worktree = { path: resolved, owned: false }
+              const persistNotes = await persistWorktreeOwnership(deps, { path: resolved, branch, repoRoot: root, owned: false })
               const { notes } = await applyDirectoryChange($, state, resolved, log)
               return withNotes(
                 `Worktree at ${resolved} on branch '${branch}' already exists — reusing it. ` +
                 `Active working directory set to ${resolved}. Repository root: ${root}.`,
-                notes,
+                [...notes, ...persistNotes],
               )
             }
           }
@@ -714,13 +975,14 @@ export async function executeUseWorktree({ path, branch, create = false, fromRem
     }
 
     state.worktree = { path: resolved, owned: true }
+    const persistNotes = await persistWorktreeOwnership(deps, { path: resolved, branch, repoRoot: root, owned: true })
     const { notes } = await applyDirectoryChange($, state, resolved, log)
 
     const fromNote = remoteBase ? ` (from ${remoteBase})` : ''
     return withNotes(
       `Worktree created at ${resolved} on branch '${branch}'${fromNote}. ` +
       `Active working directory set to ${resolved}. Repository root: ${root}.`,
-      notes,
+      [...notes, ...persistNotes],
     )
   } catch (err) {
     log('use_worktree failed', err)
@@ -772,6 +1034,7 @@ export async function executeUseClear({ fields, force = false }, state, deps) {
         )
       }
       state.worktree = null
+      await deps.persistWorktree?.remove()
     }
 
     if (toClear.includes('cwd') && state.cwd) {
