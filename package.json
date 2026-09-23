@@ -15,7 +15,7 @@
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.15.0",
-    "@opencode/plugin": "^2.0.4"
+    "@opencode/plugin": "^2.0.11"
   },
   "peerDependenciesMeta": {
     "@opencode-ai/plugin": { "optional": true },
@@ -23,7 +23,7 @@
   },
   "devDependencies": {
     "zod": "^4.1.8",
-    "@opencode/plugin": "^2.0.4",
+    "@opencode/plugin": "^2.0.11",
     "@opencode/cli": "^2.0.11"
   }
 }
