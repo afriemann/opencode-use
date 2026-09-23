@@ -2,7 +2,7 @@
 
 ## Purpose
 Automatically discovers a target repository's `AGENTS.md` and `.envrc`
-presence whenever `use_cwd` or `use_worktree` moves the session's active
+presence whenever `use_workdir` or `use_worktree` moves the session's active
 directory to a genuinely new path, injecting the found `AGENTS.md` content
 into the system prompt as clearly-labeled advisory context and reminding the
 agent to load `.envrc` explicitly, without ever executing it automatically.
@@ -12,7 +12,7 @@ agent to load `.envrc` explicitly, without ever executing it automatically.
 ### Requirement: Directory-Change Detection Gate
 
 The plugin SHALL perform repository-context discovery (`AGENTS.md` search and
-`.envrc` detection) only when a call to `use_cwd`, or any of `use_worktree`'s
+`.envrc` detection) only when a call to `use_workdir`, or any of `use_worktree`'s
 three success paths, resolves to a directory that differs from the session's
 current `state.cwd` at the time of the call. When the resolved directory is
 identical to the session's current `state.cwd`, the plugin SHALL still assign
@@ -20,16 +20,16 @@ identical to the session's current `state.cwd`, the plugin SHALL still assign
 or read any file for this purpose, and SHALL NOT append any repository-context
 note to the tool's return value.
 
-#### Scenario: use_cwd moves to a genuinely new directory
+#### Scenario: use_workdir moves to a genuinely new directory
 
-- GIVEN a session whose current `state.cwd` differs from the path passed to `use_cwd`
-- WHEN `use_cwd` resolves and validates the new path
+- GIVEN a session whose current `state.cwd` differs from the path passed to `use_workdir`
+- WHEN `use_workdir` resolves and validates the new path
 - THEN the plugin runs repository-context discovery for the resolved directory
 
-#### Scenario: use_cwd is called again with the same resolved directory
+#### Scenario: use_workdir is called again with the same resolved directory
 
-- GIVEN a session whose current `state.cwd` already equals the resolved path passed to `use_cwd`
-- WHEN `use_cwd` is called again with that same path
+- GIVEN a session whose current `state.cwd` already equals the resolved path passed to `use_workdir`
+- WHEN `use_workdir` is called again with that same path
 - THEN the plugin does not run repository-context discovery and appends no repository-context note to the return value
 
 #### Scenario: use_worktree's idempotent same-path return does not repeat discovery
@@ -40,7 +40,7 @@ note to the tool's return value.
 
 #### Scenario: use_worktree's idempotent same-path return fires after the directory moved elsewhere
 
-- GIVEN a session where `use_worktree` previously created a worktree at a path, and a later `use_cwd` call moved `state.cwd` to a different directory
+- GIVEN a session where `use_worktree` previously created a worktree at a path, and a later `use_workdir` call moved `state.cwd` to a different directory
 - WHEN `use_worktree` is called again with the original worktree's path and branch, triggering the idempotent same-path early return
 - THEN the plugin runs repository-context discovery for the worktree path, because it now differs from the session's current `state.cwd`
 
@@ -149,23 +149,26 @@ exceeds the size limit and was not loaded automatically.
 ### Requirement: Advisory System-Prompt Injection
 
 The plugin SHALL inject the session's stored `AGENTS.md` content into the
-system prompt via the `experimental.chat.system.transform` hook whenever that
-content is present, as a distinct block appended after the existing "Active
-Session Context (opencode-use)" block. This block SHALL state the repository
-path (the discovered git root, or the resolved directory itself when not in a
-git repository) and the file's path, SHALL explicitly label the content as
-repository-provided, advisory context that does not override the agent's own
-operating instructions and loses to them on conflict, and SHALL caution that
-the content may originate from a branch the agent itself navigated to rather
-than one the user chose, and so SHALL be treated as untrusted input rather
-than as commands. The content SHALL be wrapped in a fenced code region whose
-fence length is computed from the content: the plugin SHALL scan the content
-for lines that, after stripping leading whitespace, consist solely of
-backtick characters, take the length of the longest such line (zero if none
-exist), and use a fence of at least one character longer than that length,
-with a minimum of three characters, so that no line within the content can
-terminate the fenced region. When the session's stored `AGENTS.md` content is
-absent, the plugin SHALL NOT inject this block.
+system prompt via the runtime's session-context hook (V1:
+`experimental.chat.system.transform`; V2: `ctx.session.hook("context", ...)`)
+whenever that content is present, as a distinct block appended after the
+existing "Active Session Context (opencode-use)" block. This block SHALL
+state the repository path (the discovered git root, or the resolved
+directory itself when not in a git repository) and the file's path, SHALL
+explicitly label the content as repository-provided, advisory context that
+does not override the agent's own operating instructions and loses to them
+on conflict, and SHALL caution that the content may originate from a branch
+the agent itself navigated to rather than one the user chose, and so SHALL
+be treated as untrusted input rather than as commands. The content SHALL be
+wrapped in a fenced code region whose fence length is computed from the
+content: the plugin SHALL scan the content for lines that, after stripping
+leading whitespace, consist solely of backtick characters, take the length
+of the longest such line (zero if none exist), and use a fence of at least
+one character longer than that length, with a minimum of three characters,
+so that no line within the content can terminate the fenced region. When the
+session's stored `AGENTS.md` content is absent, the plugin SHALL NOT inject
+this block. This requirement's behavior is identical on both runtimes; only
+the underlying hook mechanism differs.
 
 #### Scenario: AGENTS.md content is present
 

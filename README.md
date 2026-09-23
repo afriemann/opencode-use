@@ -2,17 +2,17 @@
 
 An [opencode](https://opencode.ai) plugin that gives agents a **persistent, per-session working context** — active directory, environment variables, and git worktrees — automatically injected into every tool call that accepts a `workdir` parameter.
 
-Without this plugin, every such tool call starts from opencode's launch directory and carries no environment, making multi-repository tasks and direnv-managed projects awkward. With it, you call `use_cwd` once and every subsequent call to a workdir-aware tool (including `bash`) runs from that directory automatically.
+Without this plugin, every such tool call starts from opencode's launch directory and carries no environment, making multi-repository tasks and direnv-managed projects awkward. With it, you call `use_workdir` once and every subsequent call to a workdir-aware tool (including `bash`) runs from that directory automatically.
 
 ## Features
 
-- **`use_cwd`** — set the active working directory for the session; auto-injected into every tool call that accepts a `workdir` parameter; automatically discovers and loads the target repository's `AGENTS.md` and detects an `.envrc`
+- **`use_workdir`** — set the active working directory for the session; auto-injected into every tool call that accepts a `workdir` parameter; automatically discovers and loads the target repository's `AGENTS.md` and detects an `.envrc`
 - **`use_direnv`** — load a `.envrc` file via `direnv`; all exported variables applied to the process environment of every shell command run for the session
-- **`use_worktree`** — create (or reuse) a git worktree and set it as cwd in one call; idempotent; same auto-discovery as `use_cwd`
+- **`use_worktree`** — create (or reuse) a git worktree and set it as cwd in one call; idempotent; same auto-discovery as `use_workdir`
 - **`use_clear`** — tear down the session context; removes owned worktrees from disk
 - **Transparent injection** — two independent mechanisms, both silent to the agent: env (any shell opencode spawns for the session, via the native `shell.env` hook) and workdir (any eligible tool, via `tool.execute.before`; a tool is eligible when its schema declares an optional, unconstrained `workdir` string parameter) — the agent writes clean calls and never has to repeat itself
 - **System prompt context** — tools with no `workdir` parameter (read, write, edit, glob, grep) see the active path injected into the system prompt so they resolve file paths correctly
-- **Repository context auto-load** — whenever `use_cwd`/`use_worktree` moves the session to a genuinely new directory, the plugin searches upward (bounded by the git root) for an `AGENTS.md` and injects it into the system prompt as clearly-labeled advisory context, and detects (never executes) an `.envrc` to remind the agent to load it explicitly
+- **Repository context auto-load** — whenever `use_workdir`/`use_worktree` moves the session to a genuinely new directory, the plugin searches upward (bounded by the git root) for an `AGENTS.md` and injects it into the system prompt as clearly-labeled advisory context, and detects (never executes) an `.envrc` to remind the agent to load it explicitly
 
 ## Requirements
 
@@ -60,16 +60,16 @@ opencode discovers any `.js` file in `~/.config/opencode/plugins/` automatically
 
 ### 4. Verify
 
-Start (or restart) opencode. You should see `use_cwd`, `use_direnv`, `use_worktree`, and `use_clear` listed as available tools.
+Start (or restart) opencode. You should see `use_workdir`, `use_direnv`, `use_worktree`, and `use_clear` listed as available tools.
 
 ## Tools
 
-### `use_cwd`
+### `use_workdir`
 
 Set the active working directory for the session.
 
 ```
-use_cwd(path: string) → "Working directory set to: <resolved-path>"
+use_workdir(path: string) → "Working directory set to: <resolved-path>"
 ```
 
 | Parameter | Type | Required | Description |
@@ -104,7 +104,7 @@ use_direnv(path: string) → "<N> variable(s) loaded: ..."
 - **Replaces** any previously loaded env — does not merge.
 - If the `.envrc` is blocked (not yet `direnv allow`-ed), the tool fails with an actionable message asking the user to allow it.
 - All loaded variables are applied to the process environment of every shell command run for the session (the `bash` tool, and shell parts opencode spawns from the prompt path), except `PWD`, `OLDPWD`, and any `DIRENV_*` key — see [Hook: `shell.env`](#hook-shellenv).
-- This tool only loads the environment — it never changes the session's active working directory. Call `use_cwd` separately if you also need to move there (and note that `use_cwd` already detects an `.envrc`'s presence for you and reminds you to call this tool).
+- This tool only loads the environment — it never changes the session's active working directory. Call `use_workdir` separately if you also need to move there (and note that `use_workdir` already detects an `.envrc`'s presence for you and reminds you to call this tool).
 
 ---
 
@@ -131,8 +131,8 @@ use_worktree(path: string, branch: string, create?: boolean, fromRemote?: boolea
 - The repository root itself is rejected as the worktree path — always use a subdirectory (e.g. `.worktrees/<branch>`).
 - If the branch is already checked out at the repository root (main worktree), fails early with a clear error — switch to a different branch in the root first, then call `use_worktree` again.
 - Worktrees created by this tool are marked **owned** — `use_clear` will remove them from disk.
-- Git operations run against the active working directory (set via `use_cwd`) → `ctx.worktree` → `ctx.directory` in priority order, so calling `use_cwd` first lets this work even when opencode was opened outside a git repo.
-- When the resolved worktree directory differs from the session's current one, the plugin also runs [repository context auto-load](#repository-context-auto-load) — the return value includes any resulting notes, same as `use_cwd`.
+- Git operations run against the active working directory (set via `use_workdir`) → `ctx.worktree` → `ctx.directory` in priority order, so calling `use_workdir` first lets this work even when opencode was opened outside a git repo.
+- When the resolved worktree directory differs from the session's current one, the plugin also runs [repository context auto-load](#repository-context-auto-load) — the return value includes any resulting notes, same as `use_workdir`.
 
 ---
 
@@ -164,7 +164,7 @@ use_clear(fields: ["cwd", "worktree"])
 
 ## Repository Context Auto-Load
 
-Whenever `use_cwd` or `use_worktree` moves the session's active directory to a **genuinely new path** (not on an idempotent no-op/reuse call), the plugin automatically:
+Whenever `use_workdir` or `use_worktree` moves the session's active directory to a **genuinely new path** (not on an idempotent no-op/reuse call), the plugin automatically:
 
 1. **Searches for `AGENTS.md`.** It resolves the new directory's git root (`git rev-parse --show-toplevel`) and searches upward from the directory to that root (or just the directory itself if it isn't inside a git repository), using the **nearest** match if more than one `AGENTS.md` exists along the way. The found content is injected into the system prompt as a distinct, clearly-labeled block:
    - It states the **repository path** and the **file path**.
@@ -174,7 +174,7 @@ Whenever `use_cwd` or `use_worktree` moves the session's active directory to a *
    - A directory change always **replaces** the previously injected content (including clearing it entirely when the new directory has no `AGENTS.md`) — a session that moves between repositories never shows two repositories' instructions at once, or a stale one.
 2. **Detects (never loads) an `.envrc`.** Using the same upward search, the plugin checks — via a plain filesystem existence check only, **no `direnv` subprocess is ever invoked for this** — whether an `.envrc` exists between the directory and the git root. If one is found, a non-blocking note is appended to the tool's return value suggesting the agent call `use_direnv` explicitly. The `.envrc`'s contents are never read or executed by this detection.
 
-No failure in this process (git unavailable, permission errors, an unreadable file) can fail the triggering `use_cwd`/`use_worktree` call — discovery is entirely best-effort.
+No failure in this process (git unavailable, permission errors, an unreadable file) can fail the triggering `use_workdir`/`use_worktree` call — discovery is entirely best-effort.
 
 ## How It Works
 

@@ -6,7 +6,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { z } from 'zod'
 
-import OpenCodeUse from '../src/index.js'
+import OpenCodeUse from '../src/plugin.v1.js'
 import { makeTempDir } from './helpers.js'
 
 /**
@@ -61,10 +61,10 @@ async function makePluginWithLogs($ = fakeDirenvShell('{}')) {
   return { plugin, logs }
 }
 
-/** Set state.cwd for a fresh session via the real use_cwd tool against a real temp dir. */
+/** Set state.cwd for a fresh session via the real use_workdir tool against a real temp dir. */
 async function withActiveCwd(t, plugin, sessionID) {
   const dir = await makeTempDir(t, 'workdir-injection-')
-  await plugin.tool.use_cwd.execute({ path: dir }, { sessionID, directory: dir })
+  await plugin.tool.use_workdir.execute({ path: dir }, { sessionID, directory: dir })
   return dir
 }
 
@@ -258,7 +258,7 @@ describe('Tool Workdir Injection', () => {
     const sessionID = uniqueSessionId()
     await withActiveCwd(t, plugin, sessionID)
 
-    for (const selfToolID of ['use_cwd', 'use_direnv', 'use_worktree', 'use_clear']) {
+    for (const selfToolID of ['use_workdir', 'use_direnv', 'use_worktree', 'use_clear']) {
       // Artificially eligible-looking schema, to prove the self-tool guard —
       // not the eligibility predicate — is what blocks recording and injection.
       const def = {

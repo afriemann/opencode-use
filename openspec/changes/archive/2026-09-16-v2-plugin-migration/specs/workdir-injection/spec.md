@@ -1,14 +1,4 @@
-# workdir-injection Specification
-
-## Purpose
-
-Defines how the plugin automatically propagates the session's active working
-directory (set via `use_workdir` / `use_worktree`) and active environment (set via
-`use_direnv`) into subsequent tool calls, without the agent needing to repeat
-itself, and how it informs the agent of this behaviour via tool-schema
-annotation and system-prompt injection.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: System Prompt Session Context
 
@@ -67,12 +57,12 @@ by its source's rules, the tool is NOT workdir-capable. The built-in shell
 tool SHALL always be treated as eligible for this injection, independent of
 what the schema-annotation hook recorded for it, because its real,
 live-converted schema does not reliably match any detection source. The
-plugin SHALL NOT record any of its own tools (`use_workdir`, `use_direnv`,
+plugin SHALL NOT record any of its own tools (`use_cwd`, `use_direnv`,
 `use_worktree`, `use_clear`) as workdir-capable.
 
 #### Scenario: Session has an active working directory, an eligible tool, call omits workdir
 
-- GIVEN a session where `use_workdir` was previously called and the session's `cwd` is set, and a tool cached as workdir-capable
+- GIVEN a session where `use_cwd` was previously called and the session's `cwd` is set, and a tool cached as workdir-capable
 - WHEN a call to that tool is made without an explicit `workdir` argument
 - THEN the plugin sets the call's `workdir` argument to the session's active working directory before it executes
 

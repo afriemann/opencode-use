@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { exec } from 'node:child_process'
 import { join } from 'node:path'
 
-import OpenCodeUse from '../src/index.js'
+import OpenCodeUse from '../src/plugin.v1.js'
 import { makeTempDir } from './helpers.js'
 
 /**

@@ -7,7 +7,7 @@ import { mkdir, rm } from 'node:fs/promises'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 
-import OpenCodeUse from '../src/index.js'
+import OpenCodeUse from '../src/plugin.v1.js'
 
 let sessionCounter = 0
 function uniqueSessionId() {
@@ -43,7 +43,7 @@ describe('Path Resolution — Tilde Expansion', () => {
     const plugin = await makePlugin()
     const sessionID = uniqueSessionId()
 
-    const result = await plugin.tool.use_cwd.execute(
+    const result = await plugin.tool.use_workdir.execute(
       { path: '~' },
       { sessionID, directory: undefined },
     )
@@ -62,7 +62,7 @@ describe('Path Resolution — Tilde Expansion', () => {
     const plugin = await makePlugin()
     const sessionID = uniqueSessionId()
 
-    const result = await plugin.tool.use_cwd.execute(
+    const result = await plugin.tool.use_workdir.execute(
       { path: '~/git/example-repo' },
       { sessionID, directory: undefined },
     )
@@ -86,7 +86,7 @@ describe('Path Resolution — Tilde Expansion', () => {
     const plugin = await makePlugin()
     const sessionID = uniqueSessionId()
 
-    const result = await plugin.tool.use_cwd.execute(
+    const result = await plugin.tool.use_workdir.execute(
       { path: '~otheruser/subpath' },
       { sessionID, directory: baseDir },
     )

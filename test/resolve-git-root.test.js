@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { mkdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import OpenCodeUse from '../src/index.js'
+import OpenCodeUse from '../src/plugin.v1.js'
 import { resolveGitRoot } from '../src/lib.js'
 import { makeTempDir, makeTempRepo, nodeShellShim, runGit } from './helpers.js'
 
@@ -97,7 +97,7 @@ describe('use_worktree integration', () => {
       $: nodeShellShim,
     })
 
-    // Session with no prior use_cwd call, opened outside a git repository —
+    // Session with no prior use_workdir call, opened outside a git repository —
     // the exact conditions that reproduced the original bug.
     const ctx = { sessionID: 'use-worktree-integration-test', directory: invalidCandidateRoot }
 
