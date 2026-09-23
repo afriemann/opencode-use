@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { rm, writeFile } from 'node:fs/promises'
 
-import OpenCodeUse from '../src/index.js'
+import OpenCodeUse from '../src/plugin.v1.js'
 import { makeTempDir, makeTempRepo, nodeShellShim, runGit } from './helpers.js'
 
 describe('use_clear resolves the correct repository root for owned worktree removal', () => {
@@ -26,7 +26,7 @@ describe('use_clear resolves the correct repository root for owned worktree remo
 
     // Session context now drifts to an unrelated repository — the exact condition
     // that reproduced the original "is not a working tree" failure.
-    await plugin.tool.use_cwd.execute({ path: repoB }, ctx)
+    await plugin.tool.use_workdir.execute({ path: repoB }, ctx)
 
     const result = await plugin.tool.use_clear.execute({ fields: ['worktree'] }, ctx)
 
@@ -56,7 +56,7 @@ describe('use_clear resolves the correct repository root for owned worktree remo
     // Session context drifts to a non-repository directory, and the entire
     // repository containing the worktree is then removed from disk — neither
     // candidate resolveGitRoot tries can resolve to a containing repository.
-    await plugin.tool.use_cwd.execute({ path: invalidCandidateRoot }, ctx)
+    await plugin.tool.use_workdir.execute({ path: invalidCandidateRoot }, ctx)
     await rm(repoA, { recursive: true, force: true })
 
     await assert.rejects(

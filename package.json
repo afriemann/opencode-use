@@ -2,15 +2,28 @@
   "name": "opencode-use",
   "version": "0.1.0",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/plugin.v1.js",
+  "exports": {
+    ".": "./src/plugin.v1.js",
+    "./v1": "./src/plugin.v1.js",
+    "./v2": "./src/plugin.v2.js"
+  },
   "engines": { "node": ">=22.5" },
   "scripts": {
-    "test": "node --check src/index.js && node --test && echo 'Syntax OK'"
+    "test": "node --check src/core.js && node --check src/plugin.v1.js && node --check src/plugin.v2.js && node --test=test/ && echo 'Syntax OK'",
+    "test:e2e": "node test/e2e/run.mjs"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.15.0"
+    "@opencode-ai/plugin": ">=1.15.0",
+    "@opencode/plugin": "^2.0.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": { "optional": true },
+    "@opencode/plugin": { "optional": true }
   },
   "devDependencies": {
-    "zod": "^4.1.8"
+    "zod": "^4.1.8",
+    "@opencode/plugin": "^2.0.4",
+    "@opencode/cli": "^2.0.4"
   }
 }
