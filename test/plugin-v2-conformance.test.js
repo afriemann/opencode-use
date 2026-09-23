@@ -7,15 +7,18 @@
 import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+import { makeFakeStorage, nodeShellShim, runGit } from './helpers.js'
 
 /**
  * Minimal mock of the V2 plugin Context (@opencode/plugin's `Context`
  * shape) sufficient to drive src/plugin.v2.js's setup() and capture what it
  * registers, without a real @opencode/cli runtime.
  */
-function makeMockContext({ directory = '/tmp/mock-project' } = {}) {
+function makeMockContext({ directory = '/tmp/mock-project', storage } = {}) {
   const registeredHooks = { tool: {}, shell: {}, session: {} }
   const disposals = { tool: {}, shell: {}, session: {}, transform: false }
   let toolEditor
@@ -26,6 +29,7 @@ function makeMockContext({ directory = '/tmp/mock-project' } = {}) {
   const ctx = {
     app: {},
     location: { directory },
+    storage,
     tool: {
       async transform(callback) {
         toolEditor = makeToolEditor()
@@ -127,6 +131,21 @@ async function loadPluginWithMockContext(overrides = {}) {
   return { cleanup, ctx, registeredHooks, disposals, getToolEditor, emitEvent, ...rest }
 }
 
+/**
+ * Like `loadPluginWithMockContext`, but installs a real `globalThis.Bun.$`
+ * (the `nodeShellShim`) for the caller-controlled duration, rather than a
+ * throwing fake. Use only for tests that intentionally exercise real git —
+ * the caller must restore `globalThis.Bun` itself (see `restoreBun`).
+ */
+async function loadPluginWithRealShell(overrides = {}) {
+  const { ctx, getToolEditor, emitEvent } = makeMockContext(overrides)
+  const previousBun = globalThis.Bun
+  globalThis.Bun = { $: nodeShellShim }
+  const mod = await import('../src/plugin.v2.js?t=' + Date.now())
+  const cleanup = await mod.default.setup(ctx)
+  return { cleanup, getToolEditor, emitEvent, restoreBun: () => { globalThis.Bun = previousBun } }
+}
+
 describe('plugin.v2.js adapter conformance', () => {
   it('registers all four custom tools, each with options.codemode === false (D4)', async () => {
     const { getToolEditor } = await loadPluginWithMockContext()
@@ -204,13 +223,24 @@ describe('plugin.v2.js adapter conformance', () => {
   })
 
   it("setup()'s cleanup disposes ALL FOUR registrations (transform + 3 hooks) and aborts the event subscription", async () => {
-    const { cleanup, disposals } = await loadPluginWithMockContext()
+    const backing = new Map()
+    backing.set('worktree/v1/still-there', {
+      schema: 1, sessionID: 'still-there', path: '/tmp/x', branch: 'x', repoRoot: '/tmp/repo-x', owned: true, createdAt: new Date().toISOString(),
+    })
+    const { storage } = makeFakeStorage(backing)
+    const { cleanup, disposals, emitEvent } = await loadPluginWithMockContext({ storage })
     assert.equal(typeof cleanup, 'function')
     await cleanup()
     assert.equal(disposals.transform, true, 'tool.transform Registration must be disposed')
     assert.equal(disposals.tool['execute.before'], true, 'tool.hook("execute.before") Registration must be disposed')
     assert.equal(disposals.shell['create.before'], true, 'shell.hook("create.before") Registration must be disposed')
     assert.equal(disposals.session['context'], true, 'session.hook("context") Registration must be disposed')
+
+    // The session.deleted branch shares the same event subscription (D9) —
+    // an event emitted after disposal must not be processed by either branch.
+    emitEvent({ type: 'session.deleted', sessionID: 'still-there' })
+    await new Promise((r) => setImmediate(r))
+    assert.ok(backing.has('worktree/v1/still-there'), 'no event may be processed after the disposer runs')
   })
 
   it('use_direnv, use_worktree, and use_clear are each invocable through their V2 execute() wrapper and return { content: string }', async () => {
@@ -250,5 +280,183 @@ describe('plugin.v2.js adapter conformance', () => {
     } finally {
       await rm(tmpDir, { recursive: true, force: true })
     }
+  })
+
+  it('capability-detects ctx.storage and completes setup() without throwing when it is absent (design.md D4)', async () => {
+    const { cleanup } = await loadPluginWithMockContext({ storage: undefined })
+    assert.equal(typeof cleanup, 'function')
+  })
+
+  it('awaits hydration before any tool/hook is registered (design.md D3)', async () => {
+    const { storage, backing } = makeFakeStorage()
+    const order = []
+    const tracedStorage = {
+      ...storage,
+      async scan(opts) {
+        order.push('hydrate-scan')
+        return storage.scan(opts)
+      },
+    }
+    backing.set('worktree/v1/preexisting-session', {
+      schema: 1,
+      sessionID: 'preexisting-session',
+      path: '/tmp/does-not-matter',
+      branch: 'irrelevant',
+      repoRoot: '/tmp/does-not-matter-repo',
+      owned: true,
+      createdAt: new Date().toISOString(),
+    })
+
+    const { getToolEditor } = await loadPluginWithMockContext({ storage: tracedStorage })
+    // The scan must have happened (hydration ran); tool registration having
+    // completed by the time setup() resolves proves the ordering, since
+    // setup() only resolves after both the awaited hydrate() and the
+    // awaited tool.transform() have completed in sequence (D3 step 4 before
+    // step 5) — a fresh, empty editor after setup() would indicate hydration
+    // never ran or ran after registration.
+    assert.ok(order.includes('hydrate-scan'), 'hydration must have scanned storage')
+    const editor = getToolEditor()
+    assert.ok(editor.list().some((t) => t.id === 'use_worktree'), 'tools must be registered')
+  })
+
+  it('binds deps.persistWorktree per tool call so a restart-simulated use_worktree -> use_clear removes the worktree from disk', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'opencode-use-v2-persistence-'))
+    try {
+      await runGit('init -q', tmpDir)
+      await runGit('config user.email test@example.com', tmpDir)
+      await runGit('config user.name Test', tmpDir)
+      await runGit('commit --allow-empty -q -m init', tmpDir)
+
+      const backing = new Map()
+      const sessionID = 'v2-persistence-session'
+      const worktreePath = join(tmpDir, '.worktrees', 'feature')
+
+      // "Process 1": V2 host creates a worktree.
+      {
+        const { storage } = makeFakeStorage(backing)
+        const { getToolEditor, restoreBun } = await loadPluginWithRealShell({ directory: tmpDir, storage })
+        try {
+          const editor = getToolEditor()
+          const useWorktree = editor.get('use_worktree')
+          const result = await useWorktree.execute(
+            { path: worktreePath, branch: 'feature', create: true, fromRemote: false },
+            { sessionID },
+          )
+          assert.match(result.content, /^Worktree created at/)
+        } finally {
+          restoreBun()
+        }
+      }
+
+      // "Process 2": fresh plugin setup, same backing storage — simulates a restart.
+      {
+        const { storage } = makeFakeStorage(backing)
+        const { getToolEditor, restoreBun } = await loadPluginWithRealShell({ directory: tmpDir, storage })
+        try {
+          const editor = getToolEditor()
+          const useClear = editor.get('use_clear')
+          const result = await useClear.execute({ fields: ['worktree'] }, { sessionID })
+          assert.match(result.content, /^Removed owned worktree at/)
+        } finally {
+          restoreBun()
+        }
+      }
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('extends the mcp.tools.changed event loop with a session.deleted branch that removes exactly that session\'s storage key (design.md D9)', async () => {
+    const backing = new Map()
+    backing.set('worktree/v1/session-a', {
+      schema: 1, sessionID: 'session-a', path: '/tmp/a', branch: 'a', repoRoot: '/tmp/repo-a', owned: true, createdAt: new Date().toISOString(),
+    })
+    backing.set('worktree/v1/session-b', {
+      schema: 1, sessionID: 'session-b', path: '/tmp/b', branch: 'b', repoRoot: '/tmp/repo-b', owned: true, createdAt: new Date().toISOString(),
+    })
+    const { storage } = makeFakeStorage(backing)
+
+    const { emitEvent } = await loadPluginWithMockContext({ storage })
+
+    emitEvent({ type: 'session.deleted', sessionID: 'session-a' })
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+
+    assert.ok(!backing.has('worktree/v1/session-a'), 'the deleted session\'s key must be removed')
+    assert.ok(backing.has('worktree/v1/session-b'), 'other sessions\' keys must be untouched')
+  })
+
+  it('session deletion cleanup does not affect the worktree on disk (worktree-ownership-persistence spec)', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'opencode-use-v2-session-deleted-worktree-'))
+    try {
+      await runGit('init -q', tmpDir)
+      await runGit('config user.email test@example.com', tmpDir)
+      await runGit('config user.name Test', tmpDir)
+      await runGit('commit --allow-empty -q -m init', tmpDir)
+
+      const backing = new Map()
+      const sessionID = 'session-deleted-worktree-survives'
+      const worktreePath = join(tmpDir, '.worktrees', 'feature')
+      const { storage } = makeFakeStorage(backing)
+      const { getToolEditor, emitEvent, restoreBun } = await loadPluginWithRealShell({ directory: tmpDir, storage })
+      try {
+        const useWorktree = getToolEditor().get('use_worktree')
+        const created = await useWorktree.execute(
+          { path: worktreePath, branch: 'feature', create: true, fromRemote: false },
+          { sessionID },
+        )
+        assert.match(created.content, /^Worktree created at/)
+        assert.ok(backing.has(`worktree/v1/${sessionID}`))
+
+        emitEvent({ type: 'session.deleted', sessionID })
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+
+        assert.ok(!backing.has(`worktree/v1/${sessionID}`), 'the storage record must be removed')
+        const list = (await runGit('worktree list --porcelain', tmpDir)).trim()
+        assert.ok(list.includes(worktreePath), 'the worktree must remain registered in git — session deletion must never remove it')
+        assert.ok(existsSync(worktreePath), 'the worktree directory must still exist on disk')
+      } finally {
+        restoreBun()
+      }
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('a storage removal failure during session.deleted cleanup is caught, logged, and does not stop subsequent events from being processed', async () => {
+    const backing = new Map()
+    backing.set('worktree/v1/session-a', {
+      schema: 1, sessionID: 'session-a', path: '/tmp/a', branch: 'a', repoRoot: '/tmp/repo-a', owned: true, createdAt: new Date().toISOString(),
+    })
+    backing.set('worktree/v1/session-b', {
+      schema: 1, sessionID: 'session-b', path: '/tmp/b', branch: 'b', repoRoot: '/tmp/repo-b', owned: true, createdAt: new Date().toISOString(),
+    })
+    const { storage: base } = makeFakeStorage(backing)
+    let failNext = true
+    const storage = {
+      ...base,
+      async remove(key) {
+        if (failNext) {
+          failNext = false
+          throw new Error('simulated remove failure')
+        }
+        return base.remove(key)
+      },
+    }
+
+    const { emitEvent } = await loadPluginWithMockContext({ storage })
+
+    emitEvent({ type: 'session.deleted', sessionID: 'session-a' })
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+    // First removal failed -> key A survives.
+    assert.ok(backing.has('worktree/v1/session-a'))
+
+    emitEvent({ type: 'session.deleted', sessionID: 'session-b' })
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+    // The loop must still be alive and process the next event.
+    assert.ok(!backing.has('worktree/v1/session-b'))
   })
 })

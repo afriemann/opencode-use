@@ -212,7 +212,22 @@ State is stored in a `Map` keyed by `sessionID`. Each session has:
 }
 ```
 
-State is in-process only — it does not persist across opencode restarts.
+State is in-process only — it does not persist across opencode restarts, with one
+exception: on the V2 runtime, `worktree` ownership (`path`, `branch`, `repoRoot`,
+`owned`) is additionally persisted to `ctx.storage`, opencode V2's durable,
+disk-backed, per-plugin key/value store. At `setup()`, before any tool or hook
+is registered, every persisted record is validated against the actual state of
+its git repository (`git worktree list`) and restored only if it still matches;
+a stale or unconfirmable record is dropped (and its storage key removed) rather
+than trusted. This closes the case where a worktree created before an opencode
+restart could no longer be recognized as owned, causing `use_clear` to report
+"Nothing to clear" even though the worktree still existed on disk. The record
+is removed from storage when `use_clear` clears the `worktree` field, and also
+when the owning session itself is deleted — in both cases only the storage
+record is removed, never the worktree on disk itself. `cwd`, `env`, and
+`agentsMd` are not persisted on either runtime and remain in-process-only, as
+before. On V1 (`@opencode-ai/plugin`), which has no equivalent storage API,
+all state remains in-process-only with no exception.
 
 ## Development
 

@@ -77,6 +77,25 @@ async function realpathBestEffort(path) {
 }
 
 /**
+ * Whether two paths refer to the same location, tolerant of symlink
+ * resolution differences — e.g. one side is git's own realpath'd
+ * `worktree list` output, the other is the plugin's own `resolve()`d path
+ * (design.md D3). Compares `resolve()`-normalised paths first, then falls
+ * back to a realpath'd comparison so a symlinked path component doesn't
+ * cause a spurious mismatch. Returns `false` for a missing/empty path
+ * rather than throwing.
+ */
+export async function isSamePath(a, b) {
+  if (!a || !b) return false
+  if (resolve(a) === resolve(b)) return true
+  const [realA, realB] = await Promise.all([
+    realpathBestEffort(resolve(a)),
+    realpathBestEffort(resolve(b)),
+  ])
+  return realA === realB
+}
+
+/**
  * Whether `child` is inside `parent`, or equal to it. Used to validate that a
  * resolved git root candidate actually contains the target worktree path —
  * a candidate can be a perfectly valid git repository while still being the
