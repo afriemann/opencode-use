@@ -217,10 +217,13 @@ function truncateContentToBytes(content, maxBytes) {
  * Discover repository context (an `AGENTS.md` file and `.envrc` presence)
  * for `dir`, bounded by `dir`'s git root (or `dir` itself when not inside a
  * git repository). Never throws: every internal failure (git, filesystem, or
- * unexpected) is caught, logged, and resolves to `{ agentsMd: null, notes: [] }`.
- * `.envrc` is only ever checked for existence — never read, never executed.
+ * unexpected) is caught, logged, and resolves to
+ * `{ agentsMd: null, envrcPath: null, notes: [] }`. `.envrc` is only ever
+ * checked for existence — never read, never executed — for this discovery
+ * step; `envrcPath` is surfaced so a caller (`applyDirectoryChange`) can
+ * decide whether to load it (design.md D1).
  *
- * @returns {Promise<{ agentsMd: { repoPath: string, filePath: string, content: string }|null, notes: string[] }>}
+ * @returns {Promise<{ agentsMd: { repoPath: string, filePath: string, content: string }|null, envrcPath: string|null, notes: string[] }>}
  */
 export async function resolveRepoContext($, dir, log) {
   try {
@@ -275,42 +278,342 @@ export async function resolveRepoContext($, dir, log) {
       }
     }
 
-    if (envrcPath) {
-      notes.push(
-        `Found .envrc at ${envrcPath} — call use_direnv('${dirname(envrcPath)}') to load it ` +
-        `(not loaded automatically).`,
-      )
-    }
-
-    return { agentsMd, notes }
+    return { agentsMd, envrcPath, notes }
   } catch (err) {
     log?.('resolveRepoContext failed', err)
-    return { agentsMd: null, notes: [] }
+    return { agentsMd: null, envrcPath: null, notes: [] }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Direnv status/export/allow primitives
+// ---------------------------------------------------------------------------
+
+/**
+ * Budget for any single `direnv` subprocess invocation (`status`, `export`,
+ * `allow`), mirroring the existing `HYDRATION_TIMEOUT_MS` convention. A Bun
+ * `$` subprocess cannot be aborted mid-flight, so a timeout abandons the
+ * promise (attaching a no-op `.catch()` so the eventual settlement doesn't
+ * produce an unhandled rejection) and treats the call as failed.
+ */
+export const DIRENV_TIMEOUT_MS = 5000
+
+/** Race `promise` against `DIRENV_TIMEOUT_MS`; resolves `TIMED_OUT` on timeout without waiting for `promise` to settle. */
+const TIMED_OUT = Symbol('direnv-timeout')
+function withDirenvTimeout(promise) {
+  promise.catch(() => {}) // Prevent an unhandled rejection if it settles after the race.
+  const timeout = new Promise((resolvePromise) => setTimeout(() => resolvePromise(TIMED_OUT), DIRENV_TIMEOUT_MS))
+  return Promise.race([promise, timeout])
+}
+
+/**
+ * Pure predicate: does `status` (the parsed JSON from `direnv status --json`)
+ * report `envrcPath` — the exact file discovery found — as allowed?
+ *
+ * Matching on the path matters: direnv's own upward search is unbounded,
+ * unlike discovery's git-root-bounded search (design.md D3), so a status hit
+ * for a different (e.g. ancestor) RC file must not be read as a hit for ours.
+ * `allowed: 1` (never approved) and `allowed: 2` (explicitly denied via
+ * `direnv deny`) both return `false` here — this predicate only answers
+ * "auto-load-eligible", not "why not".
+ */
+export function isDirenvStatusAllowed(status, envrcPath) {
+  const foundRC = status?.state?.foundRC
+  if (!foundRC || typeof foundRC !== 'object') return false
+  return foundRC.allowed === 0 && foundRC.path === envrcPath
+}
+
+/**
+ * Never throws. Returns `false` for every uncertainty — non-zero exit,
+ * `ENOENT` (direnv absent), timeout, empty stdout, malformed JSON, or a
+ * status shape `isDirenvStatusAllowed` doesn't recognise — logging the
+ * reason each time. Fail-closed is the safe direction: a false negative
+ * costs the agent today's `use_direnv` suggestion; a false positive would
+ * execute an `.envrc` the user never trusted (design.md D2).
+ *
+ * @returns {Promise<boolean>}
+ */
+export async function checkDirenvAllowed($, { anchorDir, envrcPath }, log) {
+  try {
+    const result = await withDirenvTimeout($`direnv status --json`.cwd(anchorDir).quiet().text())
+    if (result === TIMED_OUT) {
+      log?.(`checkDirenvAllowed: direnv status --json timed out after ${DIRENV_TIMEOUT_MS}ms in ${anchorDir}`)
+      return false
+    }
+    const trimmed = result.trim()
+    if (!trimmed) {
+      log?.(`checkDirenvAllowed: empty stdout from direnv status --json in ${anchorDir}`)
+      return false
+    }
+    let status
+    try {
+      status = JSON.parse(trimmed)
+    } catch (err) {
+      log?.(`checkDirenvAllowed: malformed JSON from direnv status --json in ${anchorDir}`, err)
+      return false
+    }
+    return isDirenvStatusAllowed(status, envrcPath)
+  } catch (err) {
+    log?.(`checkDirenvAllowed: direnv status --json failed in ${anchorDir}`, err)
+    return false
+  }
+}
+
+/**
+ * Run `direnv export json` at `dir` and return the parsed, null-filtered,
+ * `String()`-coerced environment delta. Throws the raw, unwrapped rejection
+ * (preserving `.stderr`/`.code`) on subprocess failure, and lets a
+ * `JSON.parse` failure propagate — exactly today's `executeUseDirenv`
+ * sequence, extracted so `executeUseDirenv`'s own error translation (blocked,
+ * `ENOENT`, fallback) stays entirely in `core.js`, unchanged (design.md D4).
+ *
+ * @returns {Promise<Record<string,string>>}
+ */
+export async function runDirenvExportJson($, dir) {
+  const stdout = await $`direnv export json`.cwd(dir).quiet().text()
+  const trimmed = stdout.trim()
+  const raw = trimmed ? JSON.parse(trimmed) : {}
+  const envDelta = {}
+  for (const [k, v] of Object.entries(raw)) {
+    if (v !== null) envDelta[k] = String(v)
+  }
+  return envDelta
+}
+
+/**
+ * Never-throwing, timeout-bounded wrapper around {@link runDirenvExportJson}
+ * for the auto-load path, which needs none of `executeUseDirenv`'s rich error
+ * translation — the allowed-check already passed, and every failure's remedy
+ * is identical (fall back to the note-only behaviour). Returns `null` on any
+ * failure (subprocess error, timeout, malformed JSON), logging the reason.
+ *
+ * @returns {Promise<Record<string,string>|null>}
+ */
+async function loadDirenvEnvSafe($, dir, log) {
+  try {
+    const result = await withDirenvTimeout(runDirenvExportJson($, dir))
+    if (result === TIMED_OUT) {
+      log?.(`loadDirenvEnvSafe: direnv export json timed out after ${DIRENV_TIMEOUT_MS}ms in ${dir}`)
+      return null
+    }
+    return result
+  } catch (err) {
+    log?.(`loadDirenvEnvSafe: direnv export json failed in ${dir}`, err)
+    return null
+  }
+}
+
+/**
+ * Auto-trusts a newly created worktree's `.envrc` when it is byte-identical
+ * to the repository root's own already-allowed `.envrc` (design.md D7,
+ * feature (e), narrowed to the create path only). Never throws.
+ *
+ * TOCTOU-safe by construction: every step reads fresh at the moment of
+ * decision — nothing is reused from an earlier `resolveRepoContext` call,
+ * and only the repository root's own `.envrc` is ever compared (no upward
+ * search, no other-worktree comparison) since the byte-identity argument is
+ * only defensible for the root↔worktree pair — a worktree is a checkout of
+ * the same tracked tree as the root.
+ *
+ * @returns {Promise<{ notes: string[], contentVerified: boolean }>} `contentVerified: false`
+ *   means the caller must skip auto-load for this pass — `direnv allow`
+ *   hashes the file as it is on disk when `allow` runs, not the bytes
+ *   compared in step 1, so a post-allow re-read that disagrees means the
+ *   plugin cannot vouch for what it just blessed.
+ */
+async function maybeAutoTrustWorktreeEnvrc($, { repoRoot, worktreePath }, log) {
+  const worktreeEnvrcPath = join(worktreePath, '.envrc')
+  const rootEnvrcPath = join(repoRoot, '.envrc')
+
+  let wtBytes
+  try {
+    wtBytes = await readFile(worktreeEnvrcPath)
+  } catch {
+    return { notes: [], contentVerified: true } // No .envrc in the new worktree — nothing to trust.
+  }
+
+  let rootBytes
+  try {
+    rootBytes = await readFile(rootEnvrcPath)
+  } catch {
+    return { notes: [], contentVerified: true } // No .envrc at the repo root — nothing to compare against.
+  }
+
+  if (!rootBytes.equals(wtBytes)) {
+    return {
+      notes: [
+        `The worktree's .envrc at ${worktreeEnvrcPath} differs from the repository root's ` +
+        `(${rootEnvrcPath}) — not auto-trusted. Call use_direnv('${worktreePath}') after reviewing it.`,
+      ],
+      contentVerified: true,
+    }
+  }
+
+  const rootAllowed = await checkDirenvAllowed($, { anchorDir: repoRoot, envrcPath: rootEnvrcPath }, log)
+  if (!rootAllowed) {
+    return {
+      notes: [
+        `The worktree's .envrc at ${worktreeEnvrcPath} is byte-identical to the repository root's, ` +
+        `but the root's .envrc is not itself allowed by direnv — not auto-trusted.`,
+      ],
+      contentVerified: true,
+    }
+  }
+
+  try {
+    const result = await withDirenvTimeout($`direnv allow ${worktreeEnvrcPath}`.cwd(worktreePath).quiet().text())
+    if (result === TIMED_OUT) {
+      log?.(`maybeAutoTrustWorktreeEnvrc: direnv allow timed out after ${DIRENV_TIMEOUT_MS}ms for ${worktreeEnvrcPath}`)
+      return {
+        notes: [`Auto-trusting the worktree's .envrc at ${worktreeEnvrcPath} timed out — not loaded.`],
+        contentVerified: true,
+      }
+    }
+  } catch (err) {
+    log?.(`maybeAutoTrustWorktreeEnvrc: direnv allow failed for ${worktreeEnvrcPath}`, err)
+    return {
+      notes: [`Auto-trusting the worktree's .envrc at ${worktreeEnvrcPath} failed — not loaded.`],
+      contentVerified: true,
+    }
+  }
+
+  // Post-allow verification: `direnv allow` hashes the file as it is on disk
+  // when `allow` runs, not the bytes compared above. Re-read and compare to
+  // detect a modification in that window.
+  let reReadBytes
+  try {
+    reReadBytes = await readFile(worktreeEnvrcPath)
+  } catch (err) {
+    log?.(`maybeAutoTrustWorktreeEnvrc: post-allow re-read failed for ${worktreeEnvrcPath}`, err)
+    return {
+      notes: [
+        `The worktree's .envrc at ${worktreeEnvrcPath} could not be re-read after auto-trusting it — ` +
+        `not loaded. Inspect the file and call use_direnv('${worktreePath}') manually.`,
+      ],
+      contentVerified: false,
+    }
+  }
+  if (!reReadBytes.equals(wtBytes)) {
+    return {
+      notes: [
+        `The worktree's .envrc at ${worktreeEnvrcPath} changed between being compared and being ` +
+        `allowed — not loaded. Inspect the file and call use_direnv('${worktreePath}') manually.`,
+      ],
+      contentVerified: false,
+    }
+  }
+
+  return {
+    notes: [
+      `Auto-trusted the worktree's .envrc at ${worktreeEnvrcPath} — identical to the already-allowed ` +
+      `repository root .envrc.`,
+    ],
+    contentVerified: true,
+  }
+}
+
+/**
+ * Wraps (never bypasses) `applyDirectoryChange` for `use_worktree` (design.md
+ * D7). On any non-create path (reuse, idempotent), delegates directly with
+ * `autoLoadEnv: true` — auto-trust never runs there. On the create path, runs
+ * {@link maybeAutoTrustWorktreeEnvrc} first so that a freshly blessed
+ * `.envrc` is auto-loaded in the very same pass; `autoLoadEnv` is forced to
+ * `false` only when the post-allow re-read verification fails.
+ *
+ * @param {{ repoRoot: string, created: boolean }} options
+ * @returns {Promise<{ changed: boolean, notes: string[] }>}
+ */
+export async function applyDirectoryChangeForWorktree($, state, resolvedDir, log, { repoRoot, created }) {
+  if (created !== true) {
+    return applyDirectoryChange($, state, resolvedDir, log, { autoLoadEnv: true })
+  }
+
+  const { notes: trustNotes, contentVerified } = await maybeAutoTrustWorktreeEnvrc(
+    $, { repoRoot, worktreePath: resolvedDir }, log,
+  )
+  const { changed, notes: changeNotes } = await applyDirectoryChange(
+    $, state, resolvedDir, log, { autoLoadEnv: contentVerified },
+  )
+  return { changed, notes: [...trustNotes, ...changeNotes] }
 }
 
 /**
  * The single choke point for every session directory change. Assigns
  * `state.cwd` unconditionally, and — only when the resolved directory
- * differs from the prior `state.cwd` — runs repository-context discovery
- * and overwrites `state.agentsMd` with its result (including `null`).
+ * differs from the prior `state.cwd` — runs repository-context discovery,
+ * overwrites `state.agentsMd` with its result (including `null`), and
+ * conditionally auto-loads an already-`direnv allow`-ed `.envrc` into
+ * `state.env`/`state.envSource` (design.md D5).
  *
  * Invariant: `state.cwd` must only ever be assigned through this function
  * (see design.md D1); `use_clear` is the sole exception, and only ever nulls
  * it. The `try`/`catch` here is defense-in-depth only — `resolveRepoContext`
  * itself never throws (see design.md D8).
  *
+ * `options.autoLoadEnv` defaults to `false` **deliberately** — every call
+ * site must pass it explicitly (enforced by a source-guard test). The
+ * asymmetric failure modes decide this: a call site that forgets the
+ * argument under a `true` default would silently execute an `.envrc`
+ * subprocess nobody reviewed for it; under a `false` default it only loses a
+ * convenience.
+ *
+ * `state.env` is never cleared by a directory change — moving to a directory
+ * with no `.envrc`, or an untrusted one, leaves any previously loaded
+ * environment in place, matching `use_direnv`'s existing overwrite-only
+ * precedent. `use_clear(['env'])` remains the sole explicit way to drop it.
+ *
+ * @param {{ autoLoadEnv?: boolean }} [options]
  * @returns {Promise<{ changed: boolean, notes: string[] }>}
  */
-export async function applyDirectoryChange($, state, resolvedDir, log) {
+export async function applyDirectoryChange($, state, resolvedDir, log, options = {}) {
+  const { autoLoadEnv = false } = options
   const changed = state.cwd !== resolvedDir
   state.cwd = resolvedDir
   if (!changed) return { changed: false, notes: [] }
 
   try {
-    const { agentsMd, notes } = await resolveRepoContext($, resolvedDir, log)
+    const { agentsMd, envrcPath, notes } = await resolveRepoContext($, resolvedDir, log)
     state.agentsMd = agentsMd
-    return { changed: true, notes }
+
+    if (!envrcPath) return { changed: true, notes }
+
+    const anchorDir = dirname(envrcPath)
+    const suggestManualLoadNote =
+      `Found .envrc at ${envrcPath} — call use_direnv('${anchorDir}') to load it (not loaded automatically).`
+
+    if (!autoLoadEnv) {
+      return { changed: true, notes: [...notes, suggestManualLoadNote] }
+    }
+
+    const allowed = await checkDirenvAllowed($, { anchorDir, envrcPath }, log)
+    if (!allowed) {
+      return { changed: true, notes: [...notes, suggestManualLoadNote] }
+    }
+
+    const envDelta = await loadDirenvEnvSafe($, anchorDir, log)
+    if (envDelta === null) {
+      return {
+        changed: true,
+        notes: [
+          ...notes,
+          `Found .envrc at ${envrcPath} — it is allowed by direnv but automatic loading failed; ` +
+          `call use_direnv('${anchorDir}') to retry.`,
+        ],
+      }
+    }
+
+    state.env = envDelta
+    state.envSource = `direnv:${anchorDir}`
+    const count = Object.keys(envDelta).length
+    return {
+      changed: true,
+      notes: [
+        ...notes,
+        count > 0
+          ? `Loaded ${count} variable(s) from .envrc at ${envrcPath} (already allowed by direnv).`
+          : `.envrc at ${envrcPath} is allowed by direnv and was loaded — no environment changes exported.`,
+      ],
+    }
   } catch (err) {
     log?.('applyDirectoryChange discovery failed', err)
     state.agentsMd = null

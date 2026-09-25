@@ -138,12 +138,12 @@ async function loadPluginWithMockContext(overrides = {}) {
  * the caller must restore `globalThis.Bun` itself (see `restoreBun`).
  */
 async function loadPluginWithRealShell(overrides = {}) {
-  const { ctx, getToolEditor, emitEvent } = makeMockContext(overrides)
+  const { ctx, registeredHooks, getToolEditor, emitEvent } = makeMockContext(overrides)
   const previousBun = globalThis.Bun
   globalThis.Bun = { $: nodeShellShim }
   const mod = await import('../src/plugin.v2.js?t=' + Date.now())
   const cleanup = await mod.default.setup(ctx)
-  return { cleanup, getToolEditor, emitEvent, restoreBun: () => { globalThis.Bun = previousBun } }
+  return { cleanup, registeredHooks, getToolEditor, emitEvent, restoreBun: () => { globalThis.Bun = previousBun } }
 }
 
 describe('plugin.v2.js adapter conformance', () => {
@@ -458,5 +458,145 @@ describe('plugin.v2.js adapter conformance', () => {
     await new Promise((r) => setImmediate(r))
     // The loop must still be alive and process the next event.
     assert.ok(!backing.has('worktree/v1/session-b'))
+  })
+})
+
+describe('plugin.v2.js — session.created / session.moved directory init (design.md D6)', () => {
+  /**
+   * These handlers perform real filesystem I/O (`stat`, and via
+   * `applyDirectoryChange`, real `git`/direnv subprocess calls) inside the
+   * event loop's async branch — genuine libuv I/O, not just microtasks — so
+   * a bare `setImmediate` flush (sufficient for the purely in-memory
+   * `session.deleted` branch elsewhere in this file) is not reliably enough
+   * settling time. Use a short real timer instead.
+   */
+  function wait(ms = 50) {
+    return new Promise((r) => setTimeout(r, ms))
+  }
+
+  async function renderSessionBlock(registeredHooks, sessionID) {
+    const hook = registeredHooks.session['context']
+    const event = { sessionID, agent: 'test', system: [], messages: [], tools: [], options: {} }
+    await hook(event)
+    return event.system.find((s) => s.text?.includes('Active Session Context'))?.text
+  }
+
+  it('Session start initializes cwd and AGENTS.md without loading env', async (t) => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'opencode-use-v2-session-created-'))
+    t.after(() => rm(tmpDir, { recursive: true, force: true }))
+    await runGit('init -q', tmpDir)
+    await runGit('config user.email test@example.com', tmpDir)
+    await runGit('config user.name Test', tmpDir)
+    const { writeFile } = await import('node:fs/promises')
+    await writeFile(join(tmpDir, 'AGENTS.md'), '# v2 session created\n')
+    await runGit('add -A', tmpDir)
+    await runGit('-c user.email=test@example.com -c user.name=test commit -q -m init', tmpDir)
+
+    const { registeredHooks, emitEvent, restoreBun } = await loadPluginWithRealShell({ directory: tmpDir })
+    try {
+      const sessionID = 'v2-session-created-session'
+      emitEvent({ type: 'session.created', data: { sessionID, location: { directory: tmpDir } } })
+      await wait()
+
+      const block = await renderSessionBlock(registeredHooks, sessionID)
+      assert.ok(block, 'expected the Active Session Context block to be present')
+      assert.ok(block.includes(tmpDir))
+      assert.ok(!block.includes('variable(s) from direnv'), 'session.created must never auto-load env')
+
+      const agentsBlock = await (async () => {
+        const hook = registeredHooks.session['context']
+        const event = { sessionID, agent: 'test', system: [], messages: [], tools: [], options: {} }
+        await hook(event)
+        return event.system.find((s) => s.text?.includes('v2 session created'))
+      })()
+      assert.ok(agentsBlock, 'expected AGENTS.md content to have been discovered')
+    } finally {
+      restoreBun()
+    }
+  })
+
+  it('Session start is skipped for a non-local starting location', async () => {
+    const { registeredHooks, emitEvent } = await loadPluginWithMockContext()
+    const sessionID = 'v2-session-created-workspace-session'
+    emitEvent({ type: 'session.created', data: { sessionID, location: { directory: '/some/remote/dir', workspaceID: 'ws-1' } } })
+    await wait()
+
+    const block = await renderSessionBlock(registeredHooks, sessionID)
+    assert.equal(block, undefined, 'expected no directory to have been initialized for a workspaceID location')
+  })
+
+  it('Session move to a directory with an already-allowed .envrc auto-loads its environment', async (t) => {
+    const fromDir = await mkdtemp(join(tmpdir(), 'opencode-use-v2-session-moved-from-'))
+    const toDir = await mkdtemp(join(tmpdir(), 'opencode-use-v2-session-moved-to-'))
+    t.after(async () => {
+      await rm(fromDir, { recursive: true, force: true })
+      await rm(toDir, { recursive: true, force: true })
+    })
+    for (const dir of [fromDir, toDir]) {
+      await runGit('init -q', dir)
+      await runGit('config user.email test@example.com', dir)
+      await runGit('config user.name Test', dir)
+      await runGit('commit --allow-empty -q -m init', dir)
+    }
+
+    const { writeFile } = await import('node:fs/promises')
+    const toEnvrcPath = join(toDir, '.envrc')
+    await writeFile(toEnvrcPath, 'export FOO=bar\n')
+
+    const { makeFakeDirenvShell } = await import('./helpers.js')
+    const $ = makeFakeDirenvShell({
+      status: () => JSON.stringify({ state: { foundRC: { allowed: 0, path: toEnvrcPath }, loadedRC: null } }),
+      exportJson: () => JSON.stringify({ FOO: 'bar' }),
+    })
+
+    const { ctx, registeredHooks, emitEvent } = makeMockContext({ directory: fromDir })
+    const previousBun = globalThis.Bun
+    globalThis.Bun = { $ }
+    const mod = await import('../src/plugin.v2.js?t=' + Date.now())
+    await mod.default.setup(ctx)
+    try {
+      const sessionID = 'v2-session-moved-session'
+      // First initialize the session at `fromDir` (session.created).
+      emitEvent({ type: 'session.created', data: { sessionID, location: { directory: fromDir } } })
+      await wait()
+      let block = await renderSessionBlock(registeredHooks, sessionID)
+      assert.ok(block.includes(fromDir))
+
+      // Now move it — state.cwd is already set, so this exercises the
+      // requireUnsetCwd: false path, and must auto-load the env.
+      emitEvent({ type: 'session.moved', data: { sessionID, location: { directory: toDir } } })
+      await wait()
+      block = await renderSessionBlock(registeredHooks, sessionID)
+      assert.ok(block.includes(toDir), 'expected state.cwd to have moved to the new directory')
+      assert.ok(block.includes('variable(s) from direnv'), 'expected session.moved to auto-load the already-allowed .envrc')
+    } finally {
+      globalThis.Bun = previousBun
+    }
+  })
+
+  it('Session move to a non-local location is skipped', async () => {
+    const { registeredHooks, emitEvent } = await loadPluginWithMockContext()
+    const sessionID = 'v2-session-moved-workspace-session'
+    emitEvent({ type: 'session.created', data: { sessionID, location: { directory: '/tmp' } } })
+    await wait()
+
+    emitEvent({ type: 'session.moved', data: { sessionID, location: { directory: '/some/remote/dir', workspaceID: 'ws-1' } } })
+    await wait()
+
+    const block = await renderSessionBlock(registeredHooks, sessionID)
+    assert.ok(block.includes('/tmp'), 'expected the directory to remain unchanged after a skipped move')
+  })
+
+  // Not tied to a specific OpenSpec scenario — an accepted regression guard
+  // ensuring the new session.created/session.moved branches (added earlier
+  // in the same event.subscribe loop) don't consume or interfere with the
+  // pre-existing mcp.tools.changed branch's reload logic.
+  it('session.created/session.moved branches coexist with mcp.tools.changed and session.deleted in the same loop', async () => {
+    const { emitEvent, getToolReloadCalls } = await loadPluginWithMockContext()
+    emitEvent({ type: 'session.created', data: { sessionID: 'coexist-session', location: { directory: '/tmp' } } })
+    await wait()
+    emitEvent({ type: 'mcp.tools.changed' })
+    await wait()
+    assert.equal(getToolReloadCalls(), 1, 'mcp.tools.changed must still trigger a reload after the new branches were added')
   })
 })

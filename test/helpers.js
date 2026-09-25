@@ -61,6 +61,67 @@ export function nodeShellShim(strings, ...values) {
   return builder
 }
 
+/**
+ * A shell shim that routes `direnv status`/`direnv export`/`direnv allow`
+ * subcommands to canned outcomes and delegates everything else (real `git`)
+ * to `nodeShellShim`, so no direnv test needs a real `direnv` on the host.
+ *
+ * @param {{
+ *   status?: string | (() => string),
+ *   exportJson?: string | (() => string) | { throw: Error },
+ *   allow?: 'ok' | { throw: Error },
+ *   hang?: boolean,
+ * }} [options] - `status`/`exportJson` are the raw stdout text to return (a
+ *   function is called fresh per invocation); `{ throw: Error }` rejects with
+ *   that Error (set `.stderr`/`.code` on it to exercise error-translation
+ *   paths). `hang: true` makes every direnv subcommand's returned promise
+ *   never settle, to exercise `DIRENV_TIMEOUT_MS` handling.
+ */
+export function makeFakeDirenvShell(options = {}) {
+  const { status, exportJson, allow, hang = false } = options
+  return function taggedTemplate(strings, ...values) {
+    const command = strings.reduce((acc, part, i) => acc + part + (values[i] ?? ''), '')
+
+    function resolveOutcome() {
+      if (command.startsWith('direnv status')) return status
+      if (command.startsWith('direnv export')) return exportJson
+      if (command.startsWith('direnv allow')) return allow
+      return undefined
+    }
+
+    if (/^direnv (status|export|allow)/.test(command)) {
+      const outcome = resolveOutcome()
+
+      function run() {
+        if (hang) return new Promise(() => {}) // never settles
+        if (outcome && typeof outcome === 'object' && 'throw' in outcome) {
+          return Promise.reject(outcome.throw)
+        }
+        const text = typeof outcome === 'function' ? outcome() : (outcome ?? '')
+        return Promise.resolve(text)
+      }
+
+      const builder = {
+        cwd() {
+          return builder
+        },
+        quiet() {
+          return builder
+        },
+        text() {
+          return run()
+        },
+        then(onFulfilled, onRejected) {
+          return run().then(onFulfilled, onRejected)
+        },
+      }
+      return builder
+    }
+
+    return nodeShellShim(strings, ...values)
+  }
+}
+
 /** Run a git command via plain child_process.exec, for test setup outside the shim's shape. */
 export function runGit(args, cwd) {
   return new Promise((resolvePromise, reject) => {

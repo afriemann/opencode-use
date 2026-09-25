@@ -222,7 +222,7 @@ describe('resolveRepoContext', () => {
 
     const result = await resolveRepoContext(nodeShellShim, repoRoot, noopLog)
 
-    assert.ok(result.notes.some((n) => n.includes('.envrc') && n.includes('use_direnv')))
+    assert.equal(result.envrcPath, join(repoRoot, '.envrc'))
   })
 
   it('no .envrc exists', async (t) => {
@@ -230,7 +230,7 @@ describe('resolveRepoContext', () => {
 
     const result = await resolveRepoContext(nodeShellShim, repoRoot, noopLog)
 
-    assert.ok(!result.notes.some((n) => n.includes('.envrc')))
+    assert.equal(result.envrcPath, null)
   })
 
   it('detection never invokes a direnv subprocess', async (t) => {
@@ -243,7 +243,7 @@ describe('resolveRepoContext', () => {
     // that failure or otherwise indicate an execution attempt occurred.
     const result = await resolveRepoContext(nodeShellShim, repoRoot, noopLog)
 
-    assert.ok(result.notes.some((n) => n.includes('.envrc')))
+    assert.equal(result.envrcPath, join(repoRoot, '.envrc'))
     // No note implies the .envrc's contents were read/executed.
     assert.ok(!result.notes.some((n) => n.includes('FOO')))
   })
@@ -344,6 +344,27 @@ describe('applyDirectoryChange', () => {
 
     await applyDirectoryChange(nodeShellShim, state, repoRootB, noopLog)
     assert.equal(state.agentsMd, null)
+  })
+
+  it('.envrc found, autoLoadEnv not requested — reports a suggestion note only', async (t) => {
+    const repoRoot = await makeTempRepo(t, 'adc-envrc-note-')
+    await writeFile(join(repoRoot, '.envrc'), 'export FOO=bar\n')
+
+    const state = { cwd: null, env: {}, envSource: null, worktree: null, agentsMd: null }
+    const result = await applyDirectoryChange(nodeShellShim, state, repoRoot, noopLog)
+
+    assert.ok(result.notes.some((n) => n.includes('.envrc') && n.includes('use_direnv')))
+    assert.deepEqual(state.env, {})
+    assert.equal(state.envSource, null)
+  })
+
+  it('no .envrc found — no .envrc note', async (t) => {
+    const repoRoot = await makeTempRepo(t, 'adc-no-envrc-note-')
+
+    const state = { cwd: null, env: {}, envSource: null, worktree: null, agentsMd: null }
+    const result = await applyDirectoryChange(nodeShellShim, state, repoRoot, noopLog)
+
+    assert.ok(!result.notes.some((n) => n.includes('.envrc')))
   })
 })
 
@@ -665,5 +686,68 @@ describe('D1 invariant guard (recommended, design.md Component Breakdown)', () =
     })
 
     assert.deepEqual(offendingLines, [], `unexpected state.cwd assignment(s) in src/lib.js:\n${offendingLines.join('\n')}`)
+  })
+
+  it('src/core.js assigns state.cwd only via null-clear (executeUseClear) — never a directory value', async () => {
+    const { readFile: readFileText } = await import('node:fs/promises')
+    const { fileURLToPath } = await import('node:url')
+    const source = await readFileText(fileURLToPath(new URL('../src/core.js', import.meta.url)), 'utf8')
+
+    const offendingLines = []
+    source.split('\n').forEach((line, i) => {
+      if (/state\.cwd\s*=\s*[^=]/.test(line) && !/state\.cwd\s*=\s*null/.test(line)) {
+        offendingLines.push(`${i + 1}: ${line.trim()}`)
+      }
+    })
+
+    assert.deepEqual(offendingLines, [], `unexpected state.cwd assignment(s) in src/core.js:\n${offendingLines.join('\n')}`)
+  })
+
+  it('src/plugin.v2.js contains no non-null state.cwd assignment', async () => {
+    const { readFile: readFileText } = await import('node:fs/promises')
+    const { fileURLToPath } = await import('node:url')
+    const source = await readFileText(fileURLToPath(new URL('../src/plugin.v2.js', import.meta.url)), 'utf8')
+
+    const offendingLines = []
+    source.split('\n').forEach((line, i) => {
+      if (/state\.cwd\s*=\s*[^=]/.test(line) && !/state\.cwd\s*=\s*null/.test(line)) {
+        offendingLines.push(`${i + 1}: ${line.trim()}`)
+      }
+    })
+
+    assert.deepEqual(offendingLines, [], `unexpected state.cwd assignment(s) in src/plugin.v2.js:\n${offendingLines.join('\n')}`)
+  })
+
+  it('every applyDirectoryChange( call site in src/*.js passes an explicit fifth argument (design.md D5)', async () => {
+    const { readFile: readFileText } = await import('node:fs/promises')
+    const { readdir } = await import('node:fs/promises')
+    const { fileURLToPath } = await import('node:url')
+    const srcDir = fileURLToPath(new URL('../src/', import.meta.url))
+    const files = (await readdir(srcDir)).filter((f) => f.endsWith('.js'))
+
+    const offending = []
+    for (const file of files) {
+      const source = await readFileText(join(srcDir, file), 'utf8')
+      const lines = source.split('\n')
+      lines.forEach((line, i) => {
+        // Match a call to applyDirectoryChange( that is not itself the function
+        // *definition* line (which starts with `export async function`) and
+        // not a call to the wrapper applyDirectoryChangeForWorktree(.
+        if (
+          /\bapplyDirectoryChange\(/.test(line) &&
+          !/^\s*export async function applyDirectoryChange\(/.test(line)
+        ) {
+          // A call's arguments may span multiple lines (e.g. wrapped for
+          // readability) — scan forward a few lines for the closing `)` and
+          // require `autoLoadEnv` to appear somewhere in that span.
+          const span = lines.slice(i, i + 4).join('\n')
+          if (!span.includes('autoLoadEnv')) {
+            offending.push(`${file}:${i + 1}: ${line.trim()}`)
+          }
+        }
+      })
+    }
+
+    assert.deepEqual(offending, [], `applyDirectoryChange( call site(s) missing an explicit autoLoadEnv option:\n${offending.join('\n')}`)
   })
 })

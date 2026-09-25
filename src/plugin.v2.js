@@ -13,6 +13,11 @@
 //   (none — V1 has no equivalent)          ctx.event.subscribe() session.deleted branch (D9):
 //                                             removes a deleted session's persisted worktree
 //                                             ownership key from ctx.storage (never the worktree itself)
+//   (none — V1 has session.created only)   ctx.event.subscribe() session.created branch (D6):
+//                                             session-start directory init, autoLoadEnv: false
+//   (none — V2-only, no V1 equivalent)     ctx.event.subscribe() session.moved branch (D6):
+//                                             treated exactly as an explicit use_workdir call,
+//                                             autoLoadEnv: true
 //
 // Key differences from V1 (see design.md D2–D8 for the full analysis):
 //   - Tool schemas are ALWAYS plain JSON Schema — no raw-Zod source exists.
@@ -47,6 +52,8 @@ import {
   executeUseDirenv,
   executeUseWorktree,
   executeUseClear,
+  resolveSessionLocation,
+  initSessionDirectory,
 } from './core.js'
 
 /** V2 renamed the built-in `bash` tool to `shell` (confirmed empirically). */
@@ -284,6 +291,30 @@ export default Plugin.define({
               await persistence?.forSession(event.sessionID).remove()
             } catch (err) {
               log('session.deleted cleanup failed', err)
+            }
+            continue
+          }
+          if (event?.type === 'session.created' || event?.type === 'session.moved') {
+            const isMove = event.type === 'session.moved'
+            try {
+              const sessionID = event.data?.sessionID
+              const resolvedDir = sessionID ? resolveSessionLocation(event.data?.location) : null
+              if (sessionID && resolvedDir) {
+                const state = getState(sessionID)
+                // A move is treated exactly as an explicit `use_workdir` call
+                // (design.md D6) — `requireUnsetCwd: false` bypasses the
+                // session-start race guard, since the whole point here is to
+                // change an already-set `state.cwd`. Session-start keeps the
+                // guard (default `requireUnsetCwd: true`) and never loads env.
+                await initSessionDirectory(
+                  state,
+                  resolvedDir,
+                  { $, log },
+                  { autoLoadEnv: isMove, requireUnsetCwd: !isMove },
+                )
+              }
+            } catch (err) {
+              log(`${event.type} init failed`, err)
             }
             continue
           }

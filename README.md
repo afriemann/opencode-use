@@ -12,7 +12,8 @@ Without this plugin, every such tool call starts from opencode's launch director
 - **`use_clear`** — tear down the session context; removes owned worktrees from disk
 - **Transparent injection** — two independent mechanisms, both silent to the agent: env (any shell opencode spawns for the session, via the native `shell.env` hook) and workdir (any eligible tool, via `tool.execute.before`; a tool is eligible when its schema declares an optional, unconstrained `workdir` string parameter) — the agent writes clean calls and never has to repeat itself
 - **System prompt context** — tools with no `workdir` parameter (read, write, edit, glob, grep) see the active path injected into the system prompt so they resolve file paths correctly
-- **Repository context auto-load** — whenever `use_workdir`/`use_worktree` moves the session to a genuinely new directory, the plugin searches upward (bounded by the git root) for an `AGENTS.md` and injects it into the system prompt as clearly-labeled advisory context, and detects (never executes) an `.envrc` to remind the agent to load it explicitly
+- **Repository context auto-load** — whenever `use_workdir`/`use_worktree` moves the session to a genuinely new directory, the plugin searches upward (bounded by the git root) for an `AGENTS.md` and injects it into the system prompt as clearly-labeled advisory context. It also checks for an `.envrc`: if found and already `direnv allow`-ed, it is loaded automatically (equivalent to `use_direnv`); otherwise a reminder is appended for the agent to load it explicitly. The plugin never runs `direnv allow` itself, except for one narrow case: auto-trusting a **newly created** git worktree's `.envrc` when it is byte-identical to an already-allowed repository root `.envrc` (see [Repository Context Auto-Load](#repository-context-auto-load))
+- **Session-start and session-move directory init** — every session (including subagents) initializes its active directory, `AGENTS.md`, and `.envrc` detection from the host's own starting location, without needing an explicit `use_workdir` call first (env is never auto-loaded at session start, only on an explicit directory change). On opencode v2, moving a session (`session.moved`) is treated exactly like an explicit `use_workdir` call, including env auto-load; v1 has no equivalent event
 
 ## Requirements
 
@@ -86,6 +87,8 @@ Loaded AGENTS.md from /home/user/git/some-repo/AGENTS.md.
 Found .envrc at /home/user/git/some-repo/.envrc — call use_direnv('/home/user/git/some-repo') to load it (not loaded automatically).
 ```
 
+If the `.envrc` is already `direnv allow`-ed, the last line instead reports the environment being loaded automatically, e.g. `Loaded 3 variable(s) from .envrc at /home/user/git/some-repo/.envrc (already allowed by direnv).` — see [Repository Context Auto-Load](#repository-context-auto-load).
+
 ---
 
 ### `use_direnv`
@@ -104,7 +107,7 @@ use_direnv(path: string) → "<N> variable(s) loaded: ..."
 - **Replaces** any previously loaded env — does not merge.
 - If the `.envrc` is blocked (not yet `direnv allow`-ed), the tool fails with an actionable message asking the user to allow it.
 - All loaded variables are applied to the process environment of every shell command run for the session (the `bash` tool, and shell parts opencode spawns from the prompt path), except `PWD`, `OLDPWD`, and any `DIRENV_*` key — see [Hook: `shell.env`](#hook-shellenv).
-- This tool only loads the environment — it never changes the session's active working directory. Call `use_workdir` separately if you also need to move there (and note that `use_workdir` already detects an `.envrc`'s presence for you and reminds you to call this tool).
+- This tool only loads the environment — it never changes the session's active working directory. Call `use_workdir` separately if you also need to move there (and note that `use_workdir`/`use_worktree` already auto-load an `.envrc` for you when it's already `direnv allow`-ed, only falling back to reminding you to call this tool when it isn't).
 
 ---
 
@@ -172,9 +175,21 @@ Whenever `use_workdir` or `use_worktree` moves the session's active directory to
    - Content is size-capped: files up to 16 KiB are injected in full; files up to 1 MiB are truncated to 16 KiB at a line boundary with a marker; files larger than 1 MiB are not read at all (a note in the tool's return value says so).
    - The content is wrapped in a fenced code block whose backtick count is computed from the content itself, so a crafted `AGENTS.md` cannot terminate the fence early and impersonate system text.
    - A directory change always **replaces** the previously injected content (including clearing it entirely when the new directory has no `AGENTS.md`) — a session that moves between repositories never shows two repositories' instructions at once, or a stale one.
-2. **Detects (never loads) an `.envrc`.** Using the same upward search, the plugin checks — via a plain filesystem existence check only, **no `direnv` subprocess is ever invoked for this** — whether an `.envrc` exists between the directory and the git root. If one is found, a non-blocking note is appended to the tool's return value suggesting the agent call `use_direnv` explicitly. The `.envrc`'s contents are never read or executed by this detection.
+2. **Conditionally auto-loads an `.envrc`.** Using the same upward search, the plugin locates an `.envrc` between the directory and the git root (a plain filesystem existence check — locating it never invokes a `direnv` subprocess). If one is found:
+   - It checks (`direnv status --json`) whether that exact file is **already** `direnv allow`-ed. This check, and everything below, is anchored at the directory the `.envrc` was actually found in (which may be an ancestor of the resolved directory), never at the resolved directory itself.
+   - If already allowed, the plugin runs `direnv export json` there and loads the resulting variables into the session's active environment — **overwriting** any previously loaded environment, but never merging with it. A load failure (timeout, non-zero exit, malformed output) leaves the previously loaded environment untouched and appends a note suggesting a manual retry via `use_direnv`.
+   - If not yet allowed (or the allow-check itself fails or times out), the plugin never runs `direnv allow` and never invokes `direnv export` — it falls back to the pre-existing behaviour: a non-blocking note suggesting the agent call `use_direnv` explicitly.
+   - Moving to a directory with **no** `.envrc`, or one that isn't (yet) allowed, never clears an environment loaded by an earlier directory change — the environment is only ever replaced by a successful auto-load, never cleared as a side effect of moving away.
+   - Every `direnv` subprocess invoked by this auto-load path (the allow-check, the export) is bounded by a timeout; a hang degrades to the same not-yet-allowed fallback rather than blocking the session.
+3. **Auto-trusts a newly created worktree's identical `.envrc` (worktree creation only).** When `use_worktree` **creates** a brand-new worktree (not when reusing an existing one, and not on the idempotent same-path case), if the new worktree's `.envrc` is byte-identical — re-read fresh at decision time — to the repository root's own `.envrc`, **and** the root's `.envrc` is already `direnv allow`-ed, the plugin runs `direnv allow` on the worktree's copy too, then re-reads it once more to confirm nothing changed in the interim before treating it as loadable. This is the **only** circumstance in which this plugin ever runs `direnv allow` unattended — every other path (a reused worktree, an ordinary `use_workdir` call, `use_direnv` itself, session-start init, a `session.moved` event) only ever reads or exports, never allows. **Caveat:** byte-identical `.envrc` content does not guarantee identical behaviour in the new directory — directives such as `source_up`, `dotenv`, or `PATH_add` resolve relative paths against the worktree's own files (which can include an untracked or gitignored file, e.g. `.env`, that differs even when `.envrc` itself does not). This residual risk is accepted, not further mitigated.
 
-No failure in this process (git unavailable, permission errors, an unreadable file) can fail the triggering `use_workdir`/`use_worktree` call — discovery is entirely best-effort.
+No failure in this process (git unavailable, permission errors, an unreadable file, a `direnv` failure or timeout) can fail the triggering `use_workdir`/`use_worktree` call — discovery and auto-load are entirely best-effort.
+
+## Session-Start and Session-Move Directory Init
+
+Independently of any explicit `use_workdir`/`use_worktree` call, every session — including subagent sessions — initializes its active directory from the host's own reported starting location as soon as it is created, running the same `AGENTS.md`/`.envrc` discovery described above. **Env is never auto-loaded at session start**, even when the `.envrc` is already allowed — only `AGENTS.md` and the `.envrc` reminder/status are established. This init step yields to (never overrides) an explicit `use_workdir`/`use_worktree` call that is already in flight for the same session.
+
+On opencode **v2 only**, moving a session to a different directory (the host's `session.moved` event) is treated exactly like an explicit `use_workdir` call, including full conditional env auto-load. opencode v1 has no equivalent event, so a v1 session's directory only ever changes via an explicit `use_workdir`/`use_worktree` call. Either way, a starting/moved-to location that carries a `workspaceID` (i.e. is not a local path on this machine) is skipped entirely — no filesystem or `direnv` work is attempted against it.
 
 ## How It Works
 
