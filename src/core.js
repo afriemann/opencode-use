@@ -9,14 +9,16 @@
 // No default export (see D8): this file is imported, never scanned as a
 // plugin candidate by either host's loader.
 
-import { resolve, isAbsolute } from 'node:path'
+import { resolve, isAbsolute, join } from 'node:path'
 import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import {
   resolveGitRoot,
   listWorktrees,
   applyDirectoryChange,
+  applyDirectoryChangeForWorktree,
   isSamePath,
+  runDirenvExportJson,
 } from './lib.js'
 
 // ---------------------------------------------------------------------------
@@ -646,8 +648,12 @@ export const TOOL_TEXT = {
       'Path must exist and be a directory. ' +
       'When the resolved directory differs from the session\'s current one, the plugin automatically ' +
       'searches upward (bounded by the git root) for an AGENTS.md file and injects its content into the ' +
-      'system prompt as advisory, repository-provided context — and separately checks (filesystem existence ' +
-      'only, no execution) for an .envrc file, appending a reminder to call use_direnv explicitly if found. ' +
+      'system prompt as advisory, repository-provided context — and separately checks for an .envrc file. ' +
+      'If found AND it is already `direnv allow`-ed, the plugin automatically loads it (equivalent to calling ' +
+      'use_direnv yourself) and reports the loaded variable count; direnv is never asked to allow a file it ' +
+      'has not already allowed — if the .envrc is not yet allowed, a reminder to call use_direnv explicitly ' +
+      'is appended instead, with no execution. A previously loaded environment is only overwritten by a ' +
+      'successful auto-load, never cleared by moving to a directory with no or not-yet-allowed .envrc. ' +
       'Returns: "Working directory set to: <resolved-path>", plus any repository-context notes.',
     path: 'Absolute or relative path to set as the working directory (a leading ~ or ~/... expands to the home directory)',
   },
@@ -690,8 +696,18 @@ export const TOOL_TEXT = {
       'Sets the active working directory to the new worktree path AND records it so use_clear can remove it from disk later. ' +
       'When the resolved worktree directory differs from the session\'s current one, the plugin automatically ' +
       'searches upward (bounded by the git root) for an AGENTS.md file and injects its content into the ' +
-      'system prompt as advisory, repository-provided context — and separately checks (filesystem existence ' +
-      'only, no execution) for an .envrc file, appending a reminder to call use_direnv explicitly if found. ' +
+      'system prompt as advisory, repository-provided context — and separately checks for an .envrc file, ' +
+      'auto-loading it (like use_workdir) if already allowed. ' +
+      'ADDITIONALLY, when this call CREATES a brand-new worktree (create=true, not a reuse of an existing one), ' +
+      'if the new worktree\'s .envrc is byte-identical to the repository root\'s own .envrc AND the root\'s .envrc ' +
+      'is already `direnv allow`-ed, the plugin automatically runs `direnv allow` on the worktree\'s copy too ' +
+      '(re-verified with a fresh read immediately after, to catch a same-moment edit) before auto-loading it. ' +
+      'This is the ONLY circumstance in which this plugin ever runs `direnv allow` unattended — it never does so ' +
+      'for a reused worktree, an ordinary use_workdir call, or use_direnv itself. ' +
+      'CAVEAT: byte-identical .envrc content does not guarantee identical behaviour in the new directory — ' +
+      'directives like `source_up`, `dotenv`, or `PATH_add` resolve relative paths against the worktree\'s own ' +
+      'files (e.g. an untracked or gitignored .env), which can differ even when .envrc itself does not; this risk ' +
+      'is accepted and not further mitigated. ' +
       'Returns: "Worktree created at <path> on branch \'<branch>\' [(from <remote-base>)]. Active working directory set to <path>. Repository root: <root>.", plus any repository-context notes. ' +
       'The reported repository root is the git repository the operation actually ran against — check it against the expected repository, since a stale session context can otherwise mask a wrong-repository worktree.',
     path: 'Path where the worktree directory will be created (or already exists) (a leading ~ or ~/... expands to the home directory)',
@@ -732,6 +748,61 @@ export const TOOL_TEXT = {
 }
 
 // ---------------------------------------------------------------------------
+// Session-start / session-move directory initialization (design.md D6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a host-reported session location to an absolute directory, or
+ * `null` when the location cannot safely be treated as a local path: a
+ * `workspaceID` is present (the directory may not exist on this machine),
+ * or no `directory` was reported at all.
+ *
+ * @param {{ directory?: string, workspaceID?: string, subpath?: string }|null|undefined} location
+ * @returns {string|null}
+ */
+export function resolveSessionLocation(location) {
+  if (!location) return null
+  if (location.workspaceID) return null
+  if (!location.directory) return null
+  return location.subpath ? join(location.directory, location.subpath) : location.directory
+}
+
+/**
+ * Initializes a session's directory at session-start (or, on V2,
+ * session-move) time by routing through the `applyDirectoryChange` choke
+ * point — never assigns `state.cwd` itself (design.md D1/D6).
+ *
+ * Never throws. Skips silently when the resolved path fails to `stat` as a
+ * directory. When `requireUnsetCwd` is true (the default, used for
+ * session-start init), also skips when `state.cwd` is already set — a race
+ * guard against an in-flight explicit `use_workdir`/`use_worktree` call that
+ * may have already completed by the time this runs (checked both before and
+ * after the async `stat`, since the race window spans that await). A V2
+ * session-move is *not* a race to guard against — the session's directory is
+ * expected to already be set, and the whole point is to change it, exactly
+ * as an explicit `use_workdir` call would — so callers handling a move pass
+ * `requireUnsetCwd: false` to bypass this guard.
+ *
+ * @param {SessionState} state
+ * @param {string} resolvedDir
+ * @param {{ $: any, log: (msg: string, err?: any) => void }} deps
+ * @param {{ autoLoadEnv: boolean, requireUnsetCwd?: boolean }} options
+ */
+export async function initSessionDirectory(state, resolvedDir, deps, { autoLoadEnv, requireUnsetCwd = true }) {
+  const { $, log } = deps
+  try {
+    if (requireUnsetCwd && state.cwd) return
+    const info = await stat(resolvedDir)
+    if (!info.isDirectory()) return
+    if (requireUnsetCwd && state.cwd) return
+    const { notes } = await applyDirectoryChange($, state, resolvedDir, log, { autoLoadEnv })
+    for (const note of notes) log(`session-init: ${note}`)
+  } catch (err) {
+    log('session directory initialization failed', err)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tool execute bodies (business logic only — no schema/host framing)
 // ---------------------------------------------------------------------------
 
@@ -746,7 +817,7 @@ export async function executeUseWorkdir({ path }, state, deps) {
     const resolved = resolvePath(path, directory, state.cwd)
     const info = await stat(resolved)
     if (!info.isDirectory()) throw new Error(`Not a directory: ${resolved}`)
-    const { notes } = await applyDirectoryChange($, state, resolved, log)
+    const { notes } = await applyDirectoryChange($, state, resolved, log, { autoLoadEnv: true })
     return withNotes(`Working directory set to: ${resolved}`, notes)
   } catch (err) {
     log('use_workdir failed', err)
@@ -760,9 +831,9 @@ export async function executeUseDirenv({ path }, state, deps) {
   try {
     const resolved = resolvePath(path, directory, state.cwd)
 
-    let stdout
+    let envDelta
     try {
-      stdout = await $`direnv export json`.cwd(resolved).quiet().text()
+      envDelta = await runDirenvExportJson($, resolved)
     } catch (err) {
       const stderr = err.stderr ?? ''
       if (
@@ -780,13 +851,6 @@ export async function executeUseDirenv({ path }, state, deps) {
         throw new Error('direnv is not installed or not on PATH')
       }
       throw new Error(`direnv export json failed in ${resolved}: ${err.stderr ?? err.message}`)
-    }
-
-    const trimmed = stdout.trim()
-    const raw = trimmed ? JSON.parse(trimmed) : {}
-    const envDelta = {}
-    for (const [k, v] of Object.entries(raw)) {
-      if (v !== null) envDelta[k] = String(v)
     }
 
     state.env = envDelta
@@ -810,7 +874,7 @@ export async function executeUseWorktree({ path, branch, create = false, fromRem
 
     if (state.worktree) {
       if (state.worktree.path === resolved) {
-        const { notes } = await applyDirectoryChange($, state, resolved, log)
+        const { notes } = await applyDirectoryChange($, state, resolved, log, { autoLoadEnv: true })
         let repoRoot = resolved
         try {
           repoRoot = (await listWorktrees($, resolved))[0]?.path ?? resolved
@@ -916,7 +980,7 @@ export async function executeUseWorktree({ path, branch, create = false, fromRem
           }
           state.worktree = { path: resolved, owned: true }
           const persistNotes = await persistWorktreeOwnership(deps, { path: resolved, branch, repoRoot: root, owned: true })
-          const { notes } = await applyDirectoryChange($, state, resolved, log)
+          const { notes } = await applyDirectoryChangeForWorktree($, state, resolved, log, { repoRoot: root, created: true })
           return withNotes(
             `Worktree created at ${resolved} on branch '${branch}' (existing branch checked out). ` +
             `Active working directory set to ${resolved}. Repository root: ${root}.`,
@@ -948,7 +1012,7 @@ export async function executeUseWorktree({ path, branch, create = false, fromRem
               } else {
                 state.worktree = { path: resolved, owned: false }
                 const persistNotes = await persistWorktreeOwnership(deps, { path: resolved, branch, repoRoot: root, owned: false })
-                const { notes } = await applyDirectoryChange($, state, resolved, log)
+                const { notes } = await applyDirectoryChange($, state, resolved, log, { autoLoadEnv: true })
                 return withNotes(
                   `Worktree at ${resolved} on branch '${branch}' already exists — reusing it. ` +
                   `Active working directory set to ${resolved}. Repository root: ${root}.`,
@@ -958,7 +1022,7 @@ export async function executeUseWorktree({ path, branch, create = false, fromRem
             } catch {
               state.worktree = { path: resolved, owned: false }
               const persistNotes = await persistWorktreeOwnership(deps, { path: resolved, branch, repoRoot: root, owned: false })
-              const { notes } = await applyDirectoryChange($, state, resolved, log)
+              const { notes } = await applyDirectoryChange($, state, resolved, log, { autoLoadEnv: true })
               return withNotes(
                 `Worktree at ${resolved} on branch '${branch}' already exists — reusing it. ` +
                 `Active working directory set to ${resolved}. Repository root: ${root}.`,
@@ -976,7 +1040,7 @@ export async function executeUseWorktree({ path, branch, create = false, fromRem
 
     state.worktree = { path: resolved, owned: true }
     const persistNotes = await persistWorktreeOwnership(deps, { path: resolved, branch, repoRoot: root, owned: true })
-    const { notes } = await applyDirectoryChange($, state, resolved, log)
+    const { notes } = await applyDirectoryChangeForWorktree($, state, resolved, log, { repoRoot: root, created: true })
 
     const fromNote = remoteBase ? ` (from ${remoteBase})` : ''
     return withNotes(

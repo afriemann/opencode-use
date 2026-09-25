@@ -25,6 +25,8 @@ import {
   executeUseDirenv,
   executeUseWorktree,
   executeUseClear,
+  resolveSessionLocation,
+  initSessionDirectory,
 } from './core.js'
 
 // ---------------------------------------------------------------------------
@@ -255,6 +257,31 @@ export default async function OpenCodeUse({ client, $ }) {
         }
       } catch (err) {
         log('tool.execute.before failed', err)
+      }
+    },
+
+    /**
+     * Session-start directory initialization (design.md D6, V1-only wiring).
+     * Only reacts to `session.created`; V1 has no session-move event, so no
+     * other branch is added here.
+     *
+     * MUST NOT throw or reject under any circumstance — same rationale as
+     * `shell.env` below.
+     */
+    event: async ({ event }) => {
+      try {
+        if (event?.type !== 'session.created') return
+        const info = event.properties?.info
+        const sessionID = info?.id
+        if (!sessionID) return
+
+        const resolvedDir = resolveSessionLocation({ directory: info?.directory })
+        if (!resolvedDir) return
+
+        const state = getState(sessionID)
+        await initSessionDirectory(state, resolvedDir, { $, log }, { autoLoadEnv: false })
+      } catch (err) {
+        log('event (session.created) failed', err)
       }
     },
 
