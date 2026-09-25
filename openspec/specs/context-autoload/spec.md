@@ -4,8 +4,11 @@
 Automatically discovers a target repository's `AGENTS.md` and `.envrc`
 presence whenever `use_workdir` or `use_worktree` moves the session's active
 directory to a genuinely new path, injecting the found `AGENTS.md` content
-into the system prompt as clearly-labeled advisory context and reminding the
-agent to load `.envrc` explicitly, without ever executing it automatically.
+into the system prompt as clearly-labeled advisory context. When a
+discovered `.envrc` is already allowed by `direnv`, its environment is
+loaded automatically; otherwise the agent is reminded to load it explicitly
+via `use_direnv`. The plugin never runs `direnv allow` as part of this
+discovery-and-load path.
 
 ## Requirements
 
