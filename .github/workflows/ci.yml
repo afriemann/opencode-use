@@ -33,6 +33,15 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      - name: Install optional V1 test SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=$'\n\t'
+          readonly sdk_dir="${RUNNER_TEMP}/opencode-v1-test-sdk"
+          npm install --prefix "$sdk_dir" --no-save --package-lock=false --ignore-scripts @opencode-ai/plugin@1.15.7
+          mkdir -p node_modules/@opencode-ai
+          ln -s "$sdk_dir/node_modules/@opencode-ai/plugin" node_modules/@opencode-ai/plugin
       - name: Run tests
         shell: bash
         run: |
