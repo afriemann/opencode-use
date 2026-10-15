@@ -2,7 +2,7 @@ name: Dependabot auto-merge
 
 on:
   workflow_run:
-    workflows: ["CI"]
+    workflows: [CI]
     types: [completed]
 
 permissions: {}
@@ -26,156 +26,64 @@ jobs:
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success'
     steps:
-      - name: Verify and merge the tested Dependabot revision
+      - name: Approve and merge the green Dependabot revision
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           IFS=$'\n\t'
-          # workflow_run executes this base-branch policy; no PR code is checked out.
-          node <<'NODE'
-          const { execFileSync } = require('node:child_process');
-          const { readFileSync } = require('node:fs');
-          const repository = process.env.GITHUB_REPOSITORY;
-          const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
-          const run = event.workflow_run;
-          const bot = 'dependabot[bot]';
-          class Ineligible extends Error {}
-          const requireEligible = (condition, reason) => {
-            if (!condition) throw new Ineligible(reason);
-          };
-          const requireArray = (value) => {
-            if (!Array.isArray(value)) throw new Error('Invalid API array');
-            return value;
-          };
-          function gh(args, input) {
-            // Argument arrays keep API strings out of shell source; never log responses.
-            return execFileSync('gh', args, {
-              input, encoding: 'utf8', timeout: 30_000,
-              maxBuffer: 8 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'],
-            });
-          }
-          const api = (path, paginate = false) => JSON.parse(gh([
-            'api', `repos/${repository}/${path}`, '--method', 'GET',
-            '--header', 'Accept: application/vnd.github+json',
-            ...(paginate ? ['--paginate', '--slurp'] : []),
-          ]));
-          const list = (path) => requireArray(api(path, true)).flatMap(requireArray);
+          export GH_REPO="$GITHUB_REPOSITORY"
+          manual() { echo "Manual review: $1"; exit 0; }
+          api() { gh api "repos/$GH_REPO/$1" --header 'Accept: application/vnd.github+json'; }
 
-          function isMinorOrPatch(message) {
-            if (typeof message !== 'string') return false;
-            const version = '(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)';
-            const subject = message.split('\n')[0].match(new RegExp(
-              `^build\\((deps|deps-dev)\\): bump ([A-Za-z0-9@_./-]+) from ${version} to ${version}$`,
-            ));
-            const documents = [...message.matchAll(/^---\n([\s\S]*?)\n\.\.\.(?:\n|$)/gm)];
-            if (!subject || documents.length !== 1 || /^dependency-group:/m.test(message)) return false;
-            const metadata = documents[0][1].match(
-              /^updated-dependencies:\n- dependency-name: "([A-Za-z0-9@_./-]+)"\n  dependency-version: ([0-9]+\.[0-9]+\.[0-9]+)\n  dependency-type: direct:(production|development)\n  update-type: version-update:semver-(patch|minor)$/,
-            );
-            if (!metadata) return false;
-            const [, scope, name, ...versions] = subject;
-            const [oldMajor, oldMinor, oldPatch, newMajor, newMinor, newPatch] = versions.map(BigInt);
-            const target = versions.slice(3).join('.');
-            return metadata[1] === name && metadata[2] === target &&
-              metadata[3] === (scope === 'deps' ? 'production' : 'development') &&
-              oldMajor === newMajor && (metadata[4] === 'minor'
-                ? newMinor > oldMinor
-                : newMinor === oldMinor && newPatch > oldPatch);
+          jq -e --arg repo "$GH_REPO" '
+            .repository.full_name == $repo and
+            (.workflow_run | .name == "CI" and .event == "pull_request" and
+              .actor.login == "dependabot[bot]" and .conclusion == "success" and
+              .head_repository.full_name == $repo and (.pull_requests | length) == 1)
+          ' "$GITHUB_EVENT_PATH" > /dev/null || manual 'Not successful same-repository Dependabot PR CI'
+          pr=$(jq -er '.workflow_run.pull_requests[0].number | select(type == "number" and . > 0 and floor == .)' "$GITHUB_EVENT_PATH")
+          sha=$(jq -er '.workflow_run.head_sha | select(test("^[a-f0-9]{40}$"))' "$GITHUB_EVENT_PATH")
+          jq -e --arg sha "$sha" '.workflow_run.pull_requests[0].head.sha == $sha' "$GITHUB_EVENT_PATH" > /dev/null || manual 'Stale CI association'
+
+          current_pr() {
+            local details
+            details=$(api "pulls/$pr")
+            jq -e --arg repo "$GH_REPO" --arg sha "$sha" '
+              .state == "open" and .draft == false and .user.login == "dependabot[bot]" and
+              .head.sha == $sha and .head.repo.full_name == $repo and
+              .base.repo.full_name == $repo and .base.ref == "main"
+            ' <<< "$details" > /dev/null || manual 'PR identity or revision changed'
+          }
+          green_checks() {
+            local checks result=0
+            checks=$(gh pr checks "$pr" --repo "$GH_REPO" --json state) || result=$?
+            case "$result" in 0|1|8) ;; *) return "$result" ;; esac
+            jq -e 'type == "array"' <<< "$checks" > /dev/null
+            jq -e 'length > 0 and all(.state == "SUCCESS")' <<< "$checks" > /dev/null || manual 'No checks reported or checks are not all green'
           }
 
-          function requiredContexts() {
-            const contexts = new Set();
-            for (const rule of list('rules/branches/main')) {
-              if (!rule || typeof rule.type !== 'string') throw new Error('Invalid rule');
-              if (rule.type !== 'required_status_checks') continue;
-              for (const check of requireArray(rule.parameters?.required_status_checks)) {
-                if (!check || typeof check.context !== 'string' || !check.context) throw new Error('Invalid context');
-                requireEligible(check.integration_id == null, 'Required check source needs manual review');
-                contexts.add(check.context);
-              }
-            }
-            requireEligible(contexts.size > 0, 'No required checks configured');
-            return [...contexts].sort();
-          }
+          current_pr
+          commits=$(api "pulls/$pr/commits")
+          jq -e --arg sha "$sha" '
+            length == 1 and .[0].sha == $sha and .[0].author.login == "dependabot[bot]" and
+            .[0].commit.verification.verified == true
+          ' <<< "$commits" > /dev/null || manual 'Not a single verified Dependabot commit'
+          # Classify the signed commit subject, not the editable PR title.
+          versions=$(jq -er --arg version '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' '
+            .[0].commit.message | split("\n")[0] |
+            capture("^build\\(deps(-dev)?\\): bump [A-Za-z0-9@_./-]+ from (?<old>" + $version + ") to (?<new>" + $version + ")$") |
+            [.old, .new] | @tsv
+          ' <<< "$commits") || manual 'Ambiguous or grouped update'
+          IFS=$'\t' read -r old new <<< "$versions"
+          [[ "${old%%.*}" == "${new%%.*}" && "$old" != "$new" ]] || manual 'Major or unchanged version'
+          printf '%s\n%s\n' "$old" "$new" | sort -VC || manual 'Version downgrade'
 
-          function greenChecks(sha, required) {
-            const pages = requireArray(api(`commits/${sha}/check-runs?filter=latest&per_page=100`, true));
-            const checks = pages.flatMap(page => requireArray(page.check_runs));
-            const ids = new Set(checks.map(check => check.id));
-            if (!pages.length || !pages.every(page => Number.isInteger(page.total_count) && page.total_count === checks.length) ||
-                ids.size !== checks.length || checks.some(check => !Number.isSafeInteger(check.id))) {
-              throw new Error('Incomplete check-run evidence');
-            }
-            const results = new Map();
-            for (const check of checks) {
-              requireEligible(check.head_sha === sha && typeof check.name === 'string' && check.name &&
-                check.status === 'completed' && check.conclusion === 'success', 'Current check is not green');
-              requireEligible(!results.has(check.name), 'Ambiguous check context');
-              results.set(check.name, true);
-            }
-            const latestStatuses = new Map();
-            const statusIds = new Set();
-            for (const status of list(`commits/${sha}/statuses?per_page=100`)) {
-              const created = Date.parse(status.created_at);
-              if (!Number.isSafeInteger(status.id) || statusIds.has(status.id) || !Number.isFinite(created) ||
-                  typeof status.context !== 'string' || !status.context) throw new Error('Invalid status evidence');
-              statusIds.add(status.id);
-              const prior = latestStatuses.get(status.context);
-              if (!prior || created > Date.parse(prior.created_at) ||
-                  (created === Date.parse(prior.created_at) && status.id > prior.id)) latestStatuses.set(status.context, status);
-            }
-            for (const status of latestStatuses.values()) {
-              requireEligible(status.state === 'success' && !results.has(status.context), 'Current status is not unambiguously green');
-              results.set(status.context, true);
-            }
-            requireEligible(required.every(name => results.has(name)), 'A required check is missing');
-          }
-
-          function verifyPullRequest(number, sha) {
-            const pr = api(`pulls/${number}`);
-            requireEligible(pr.number === number && pr.state === 'open' && pr.draft === false &&
-              pr.user?.login === bot && pr.head?.sha === sha &&
-              pr.head?.repo?.full_name === repository && pr.base?.repo?.full_name === repository &&
-              pr.base?.ref === 'main', 'PR identity or tested revision no longer qualifies');
-          }
-
-          function verifySnapshot(number, sha) {
-            verifyPullRequest(number, sha);
-            const commits = list(`pulls/${number}/commits`);
-            requireEligible(commits.length === 1 && commits[0].sha === sha && commits[0].author?.login === bot &&
-              commits[0].commit?.verification?.verified === true && isMinorOrPatch(commits[0].commit.message),
-              'Update is not a verified single Dependabot patch or minor');
-            const required = requiredContexts();
-            greenChecks(sha, required);
-            requireEligible(JSON.stringify(required) === JSON.stringify(requiredContexts()), 'Required checks changed during validation');
-            verifyPullRequest(number, sha);
-          }
-
-          try {
-            requireEligible(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) &&
-              event.repository?.full_name === repository && run?.name === 'CI' && run.event === 'pull_request' &&
-              run.actor?.login === bot && run.conclusion === 'success' && run.head_repository?.full_name === repository,
-              'Run is not successful same-repository Dependabot PR CI');
-            requireEligible(Array.isArray(run.pull_requests) && run.pull_requests.length === 1, 'No unique PR association');
-            const number = run.pull_requests[0].number;
-            const sha = run.head_sha;
-            requireEligible(Number.isSafeInteger(number) && number > 0 && /^[a-f0-9]{40}$/.test(sha) &&
-              run.pull_requests[0].head?.sha === sha, 'Run association does not identify the tested revision');
-            verifySnapshot(number, sha);
-            gh(['api', `repos/${repository}/pulls/${number}/reviews`, '--method', 'POST',
-              '--header', 'Accept: application/vnd.github+json', '--input', '-'],
-              JSON.stringify({ event: 'APPROVE', commit_id: sha }));
-            verifySnapshot(number, sha);
-            gh(['pr', 'merge', String(number), '--repo', repository, '--squash', '--match-head-commit', sha]);
-            console.log(`Approved and merged tested Dependabot PR #${number}.`);
-          } catch (error) {
-            if (error instanceof Ineligible) console.log(`Manual review: ${error.message}.`);
-            else {
-              const status = Number.isInteger(error.status) ? error.status : 'unavailable';
-              console.error(`Dependabot verification or protected operation failed (exit ${status}); no fallback attempted.`);
-              process.exitCode = 1;
-            }
-          }
-          NODE
+          green_checks
+          current_pr
+          jq -n --arg sha "$sha" '{event: "APPROVE", commit_id: $sha}' |
+            gh api "repos/$GH_REPO/pulls/$pr/reviews" --method POST --header 'Accept: application/vnd.github+json' --input - > /dev/null
+          green_checks
+          current_pr
+          gh pr merge "$pr" --repo "$GH_REPO" --squash --match-head-commit "$sha"
