@@ -22,7 +22,7 @@
     "@opencode/plugin": { "optional": true }
   },
   "devDependencies": {
-    "zod": "^4.6.6",
+    "zod": "^4.6.7",
     "@opencode/plugin": "^2.0.32",
     "@opencode/cli": "^2.0.32"
   }
