@@ -32,6 +32,7 @@
 //     resolution uses the fail-closed ladder in core.js instead of a direct
 //     sessionID lookup.
 
+import { randomUUID } from 'node:crypto'
 import { Plugin } from '@opencode/plugin'
 import {
   createSessionStore,
@@ -85,12 +86,45 @@ function makeLogger(ctx) {
   }
 }
 
+function makeDiagnostics() {
+  const enabled = process.env.OPENCODE_USE_DIAGNOSTICS === '1'
+  const instanceID = randomUUID()
+  return (message, extra = {}) => {
+    if (!enabled) return
+    try {
+      process.stderr.write(JSON.stringify({
+        service: 'opencode-use', level: 'debug', message,
+        timestamp: new Date().toISOString(), instanceID,
+        ...(typeof extra === 'function' ? extra() : extra),
+      }) + '\n')
+    } catch {
+      // Diagnostics must not interrupt context selection or tool execution.
+    }
+  }
+}
+
+function summarizeState(state) {
+  return {
+    hasCwd: Boolean(state.cwd),
+    hasWorktree: Boolean(state.worktree),
+    envCount: Object.keys(state.env).length,
+  }
+}
+
 export default Plugin.define({
   id: 'opencode-use',
   async setup(ctx) {
     const log = makeLogger(ctx)
-    const { sessions, getState } = createSessionStore()
+    const diagnostic = makeDiagnostics()
+    const { sessions, getState: lookupState } = createSessionStore()
     const directory = ctx.location?.directory ?? process.cwd()
+
+    function getState(sessionID) {
+      const exists = sessions.has(sessionID)
+      const state = lookupState(sessionID)
+      if (!exists) diagnostic('session.state', () => ({ sessionID, ...summarizeState(state) }))
+      return state
+    }
 
     // design.md D2: V2's Context has no shell-exec member. Fail loudly at
     // load time — not at first tool call — if the Bun global is absent.
@@ -105,6 +139,18 @@ export default Plugin.define({
 
     const deps = { $, log, directory }
 
+    async function runContextTool(tool, input, toolCtx, execute, callDeps = deps) {
+      const state = getState(toolCtx.sessionID)
+      let outcome = 'failed'
+      try {
+        const content = await execute(input, state, callDeps)
+        outcome = 'completed'
+        return { content }
+      } finally {
+        diagnostic('tool.state', () => ({ tool, sessionID: toolCtx.sessionID, outcome, ...summarizeState(state) }))
+      }
+    }
+
     // -----------------------------------------------------------------------
     // Worktree ownership persistence (design.md D1-D9): capability-detect
     // ctx.storage, then eagerly hydrate — fully awaited — before any tool or
@@ -118,6 +164,7 @@ export default Plugin.define({
     } else {
       await persistence.hydrate({ sessions, $, log })
     }
+    diagnostic('plugin.setup', { sessionCount: sessions.size, persistenceAvailable: Boolean(persistence) })
 
     /** @type {Map<string, boolean>} keyed by effective tool id (see D8) */
     const workdirCapable = new Map()
@@ -141,8 +188,7 @@ export default Plugin.define({
           },
           options: V2_TOOL_OPTIONS.use_workdir,
           async execute(input, toolCtx) {
-            const state = getState(toolCtx.sessionID)
-            return { content: await executeUseWorkdir(input, state, deps) }
+            return runContextTool('use_workdir', input, toolCtx, executeUseWorkdir)
           },
         },
         {
@@ -158,8 +204,7 @@ export default Plugin.define({
           },
           options: V2_TOOL_OPTIONS.use_direnv,
           async execute(input, toolCtx) {
-            const state = getState(toolCtx.sessionID)
-            return { content: await executeUseDirenv(input, state, deps) }
+            return runContextTool('use_direnv', input, toolCtx, executeUseDirenv)
           },
         },
         {
@@ -179,9 +224,8 @@ export default Plugin.define({
           },
           options: V2_TOOL_OPTIONS.use_worktree,
           async execute(input, toolCtx) {
-            const state = getState(toolCtx.sessionID)
             const callDeps = { ...deps, persistWorktree: persistence?.forSession(toolCtx.sessionID) }
-            return { content: await executeUseWorktree(input, state, callDeps) }
+            return runContextTool('use_worktree', input, toolCtx, executeUseWorktree, callDeps)
           },
         },
         {
@@ -201,9 +245,8 @@ export default Plugin.define({
           },
           options: V2_TOOL_OPTIONS.use_clear,
           async execute(input, toolCtx) {
-            const state = getState(toolCtx.sessionID)
             const callDeps = { ...deps, persistWorktree: persistence?.forSession(toolCtx.sessionID) }
-            return { content: await executeUseClear(input, state, callDeps) }
+            return runContextTool('use_clear', input, toolCtx, executeUseClear, callDeps)
           },
         },
       ]
@@ -312,6 +355,7 @@ export default Plugin.define({
                   { $, log },
                   { autoLoadEnv: isMove, requireUnsetCwd: !isMove },
                 )
+                diagnostic('session.state', () => ({ sessionID, source: event.type, ...summarizeState(state) }))
               }
             } catch (err) {
               log(`${event.type} init failed`, err)
@@ -341,14 +385,19 @@ export default Plugin.define({
     const executeBeforeRegistration = await ctx.tool.hook('execute.before', (event) => {
       try {
         const state = sessions.get(event.sessionID)
-        if (!state) return
-        if (!state.cwd) return
+        const report = (reason) => diagnostic('workdir.injection', {
+          sessionID: event.sessionID, reason,
+          tool: event.tool === ALWAYS_ELIGIBLE_TOOL_NAME ? 'shell' : 'other',
+          sessionCount: sessions.size,
+        })
+        if (!state) { report('no-state'); return }
+        if (!state.cwd) { report('no-cwd'); return }
 
         const input = event.input
-        if (!input || typeof input !== 'object') return
+        if (!input || typeof input !== 'object') { report('invalid-input'); return }
 
         const cachedEligibility = workdirCapable.get(event.tool)
-        const { inject, reason } = decideWorkdirInjection({
+        const { inject } = decideWorkdirInjection({
           toolName: event.tool,
           alwaysEligibleToolName: ALWAYS_ELIGIBLE_TOOL_NAME,
           cachedEligibility,
@@ -357,9 +406,9 @@ export default Plugin.define({
 
         if (inject) {
           input.workdir = state.cwd
-          log(`workdir-injection: ${event.tool} => ${state.cwd}`)
+          report('injected')
         } else {
-          log(`workdir-injection: ${event.tool} ${reason}`)
+          report(input.workdir ? 'explicit-workdir' : 'ineligible')
         }
       } catch (err) {
         log('execute.before failed', err)
@@ -374,17 +423,25 @@ export default Plugin.define({
     const createBeforeRegistration = await ctx.shell.hook('create.before', (event) => {
       try {
         const resolved = resolveEnvSessionForShell(sessions, { cwd: event.cwd })
-        if (!resolved) return
+        if (!resolved) {
+          diagnostic('env.injection', { reason: 'no-environment', sessionCount: sessions.size })
+          return
+        }
         if (resolved.ambiguous) {
-          log(`shell-env-injection: skipped — ambiguous among sessions [${resolved.candidates.join(', ')}]`)
+          diagnostic('env.injection', { reason: 'ambiguous', candidateCount: resolved.candidates.length })
           return
         }
 
         const injectable = filterInjectableEnv(resolved.state.env)
-        if (Object.keys(injectable).length === 0) return
+        const injectableCount = Object.keys(injectable).length
+        if (injectableCount === 0) {
+          diagnostic('env.injection', { reason: 'no-injectable-keys', sessionID: resolved.sessionID })
+          return
+        }
 
         if (!event.env || typeof event.env !== 'object') event.env = {}
         Object.assign(event.env, injectable)
+        diagnostic('env.injection', { reason: 'injected', sessionID: resolved.sessionID, injectableCount })
       } catch (err) {
         log('create.before (shell env) failed', err)
       }
@@ -423,6 +480,7 @@ export default Plugin.define({
     // -----------------------------------------------------------------------
 
     return async () => {
+      diagnostic('plugin.dispose', { sessionCount: sessions.size })
       abortController.abort()
       await toolRegistration?.dispose?.()
       await executeBeforeRegistration?.dispose?.()
