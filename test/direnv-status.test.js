@@ -85,16 +85,21 @@ describe('checkDirenvAllowed (never throws, fail-closed matrix)', () => {
     assert.equal(result, false)
   })
 
-  it('timeout — direnv status never resolves', async () => {
+  it('timeout — direnv status never resolves', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
     const $ = makeFakeDirenvShell({ hang: true })
+    let settled = false
+    const result = checkDirenvAllowed($, { anchorDir: '/repo', envrcPath: ENVRC }, noopLog).then((value) => {
+      settled = true
+      return value
+    })
 
-    const start = Date.now()
-    const result = await checkDirenvAllowed($, { anchorDir: '/repo', envrcPath: ENVRC }, noopLog)
-    const elapsed = Date.now() - start
+    t.mock.timers.tick(DIRENV_TIMEOUT_MS - 1)
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(settled, false, 'the status check must remain pending before its timeout')
 
-    assert.equal(result, false)
-    assert.ok(elapsed >= DIRENV_TIMEOUT_MS, `expected to wait out the ${DIRENV_TIMEOUT_MS}ms budget, waited ${elapsed}ms`)
-    assert.ok(elapsed < DIRENV_TIMEOUT_MS + 2000, `expected to return promptly after the timeout, waited ${elapsed}ms`)
+    t.mock.timers.tick(1)
+    assert.equal(await result, false)
   })
 
   it('empty stdout', async () => {
