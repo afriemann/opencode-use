@@ -1,5 +1,3 @@
-// spec: openspec/changes/v2-plugin-migration/design.md (D4, D6, D7, D9 layer 2)
-//
 // Adapter-conformance tests for src/plugin.v2.js: asserts the WIRING onto a
 // mocked V2 host surface only — the shared behavioural logic itself is
 // already covered once, against core.js, by the re-pointed spec suite (see
@@ -116,7 +114,7 @@ function makeMockContext({ directory = '/tmp/mock-project', storage } = {}) {
 
 async function loadPluginWithMockContext(overrides = {}) {
   const { ctx, registeredHooks, disposals, getToolEditor, emitEvent, ...rest } = makeMockContext(overrides)
-  const fakeBunDollar = mock.fn(() => {
+  const fakeBunDollar = overrides.shell ?? mock.fn(() => {
     throw new Error('fake $ invoked in conformance test — no real shell/git call expected here')
   })
   const previousBun = globalThis.Bun
@@ -145,6 +143,137 @@ async function loadPluginWithRealShell(overrides = {}) {
   const cleanup = await mod.default.setup(ctx)
   return { cleanup, registeredHooks, getToolEditor, emitEvent, restoreBun: () => { globalThis.Bun = previousBun } }
 }
+
+describe('plugin.v2.js context injection diagnostics', () => {
+  function captureDiagnostics(t, enabled = '1') {
+    const previousFlag = process.env.OPENCODE_USE_DIAGNOSTICS
+    process.env.OPENCODE_USE_DIAGNOSTICS = enabled
+    t.after(() => {
+      if (previousFlag === undefined) delete process.env.OPENCODE_USE_DIAGNOSTICS
+      else process.env.OPENCODE_USE_DIAGNOSTICS = previousFlag
+    })
+    const lines = []
+    t.mock.method(process.stderr, 'write', (line) => { lines.push(String(line)); return true })
+    return () => lines.flatMap((line) => {
+      try {
+        const entry = JSON.parse(line)
+        return entry.service === 'opencode-use' ? [entry] : []
+      } catch {
+        return []
+      }
+    })
+  }
+
+  function environmentShell(strings) {
+    const output = strings.join('').startsWith('direnv export')
+      ? JSON.stringify({ PRIVATE_DIAGNOSTIC_KEY: 'private-diagnostic-value', DIRENV_DIFF: 'private-direnv-value' })
+      : ''
+    const builder = Object.assign(Promise.resolve(output), {
+      cwd() { return builder },
+      quiet() { return builder },
+      async text() { return output },
+    })
+    return builder
+  }
+
+  it('emits no diagnostic records unless explicitly enabled', async (t) => {
+    const entries = captureDiagnostics(t, '0')
+    const plugin = await loadPluginWithMockContext()
+    t.after(plugin.cleanup)
+    await plugin.getToolEditor().get('use_clear').execute({}, { sessionID: 'disabled-diagnostics' })
+    await plugin.registeredHooks.tool['execute.before']({ tool: 'shell', sessionID: 'untracked', input: {} })
+    await plugin.registeredHooks.shell['create.before']({ cwd: '/tmp', env: {} })
+    await plugin.cleanup()
+    assert.deepEqual(entries(), [])
+  })
+
+  it('distinguishes fresh plugin instances and records state transitions without state contents', async (t) => {
+    const entries = captureDiagnostics(t)
+    const first = await loadPluginWithMockContext()
+    t.after(first.cleanup)
+    await first.getToolEditor().get('use_clear').execute({}, { sessionID: 'diagnostic-session' })
+    await first.cleanup()
+    const second = await loadPluginWithMockContext()
+    t.after(second.cleanup)
+    const setups = entries().filter((entry) => entry.message === 'plugin.setup')
+    assert.equal(setups.length, 2, 'each fresh setup must emit a diagnostic')
+    assert.notEqual(setups[0].instanceID, setups[1].instanceID)
+    assert.equal(setups[0].sessionCount, 0)
+    const state = entries().find((entry) => entry.message === 'session.state')
+    assert.equal(state.sessionID, 'diagnostic-session')
+    assert.equal(state.hasCwd, false)
+    assert.equal(state.envCount, 0)
+    assert.ok(entries().some((entry) => entry.message === 'tool.state' && entry.outcome === 'completed'))
+    assert.ok(entries().some((entry) => entry.message === 'plugin.dispose' && entry.instanceID === setups[0].instanceID))
+  })
+
+  it('reports directory and environment selection outcomes without logging inputs or environment contents', async (t) => {
+    const entries = captureDiagnostics(t)
+    const plugin = await loadPluginWithMockContext({ directory: process.cwd(), shell: environmentShell })
+    t.after(plugin.cleanup)
+    const workdirHook = plugin.registeredHooks.tool['execute.before']
+    const envHook = plugin.registeredHooks.shell['create.before']
+    const sessionID = 'diagnostic-session'
+    const event = { tool: 'shell', sessionID, input: { command: 'private-command' } }
+    await workdirHook(event)
+    await envHook({ cwd: process.cwd(), env: {} })
+    await plugin.getToolEditor().get('use_clear').execute({}, { sessionID })
+    await workdirHook(event)
+    await plugin.getToolEditor().get('use_workdir').execute({ path: process.cwd() }, { sessionID })
+    await workdirHook({ ...event, input: null })
+    await workdirHook({ ...event, tool: 'private-tool-name', input: {} })
+    await workdirHook({ ...event, input: { workdir: '/private-explicit-path' } })
+    await workdirHook(event)
+    assert.equal(event.input.workdir, process.cwd(), 'diagnostics must preserve injection')
+    await plugin.getToolEditor().get('use_direnv').execute({ path: process.cwd() }, { sessionID })
+    const shellEvent = { cwd: process.cwd(), env: {} }
+    await envHook(shellEvent)
+    assert.equal(shellEvent.env.PRIVATE_DIAGNOSTIC_KEY, 'private-diagnostic-value')
+    await plugin.getToolEditor().get('use_direnv').execute({ path: process.cwd() }, { sessionID: 'other-session' })
+    const ambiguousEvent = { cwd: '/unmatched-location', env: { EXISTING: 'unchanged' } }
+    await envHook(ambiguousEvent)
+    assert.deepEqual(ambiguousEvent.env, { EXISTING: 'unchanged' })
+    assert.deepEqual(entries().filter((entry) => entry.message === 'workdir.injection').map((entry) => entry.reason),
+      ['no-state', 'no-cwd', 'invalid-input', 'ineligible', 'explicit-workdir', 'injected'])
+    assert.deepEqual(entries().filter((entry) => entry.message === 'env.injection').map((entry) => entry.reason),
+      ['no-environment', 'injected', 'ambiguous'])
+    const injected = entries().find((entry) => entry.message === 'env.injection' && entry.reason === 'injected')
+    assert.equal(injected.injectableCount, 1)
+    const ambiguous = entries().find((entry) => entry.reason === 'ambiguous')
+    assert.equal(ambiguous.candidateCount, 2)
+    const serialized = JSON.stringify(entries())
+    for (const privateText of [process.cwd(), 'private-command', 'private-tool-name', '/private-explicit-path',
+      'PRIVATE_DIAGNOSTIC_KEY', 'private-diagnostic-value', 'DIRENV_DIFF', 'private-direnv-value']) {
+      assert.ok(!serialized.includes(privateText), `diagnostics must omit ${privateText}`)
+    }
+  })
+
+  it('keeps diagnostic sink failures from changing hook and tool results', async (t) => {
+    captureDiagnostics(t)
+    let diagnosticAttempts = 0
+    t.mock.method(process.stderr, 'write', (line) => {
+      if (String(line).startsWith('{')) {
+        diagnosticAttempts += 1
+        throw new Error('diagnostic sink unavailable')
+      }
+      return true
+    })
+    const plugin = await loadPluginWithMockContext({ directory: process.cwd(), shell: environmentShell })
+    t.after(plugin.cleanup)
+    await plugin.getToolEditor().get('use_workdir').execute({ path: process.cwd() }, { sessionID: 'sink-failure' })
+    const event = { tool: 'shell', sessionID: 'sink-failure', input: { command: 'pwd' } }
+    await plugin.registeredHooks.tool['execute.before'](event)
+    assert.equal(event.input.workdir, process.cwd())
+    await plugin.getToolEditor().get('use_direnv').execute({ path: process.cwd() }, { sessionID: 'sink-failure' })
+    const shellEvent = { cwd: process.cwd(), env: {} }
+    await plugin.registeredHooks.shell['create.before'](shellEvent)
+    assert.equal(shellEvent.env.PRIVATE_DIAGNOSTIC_KEY, 'private-diagnostic-value')
+    const result = await plugin.getToolEditor().get('use_clear').execute({}, { sessionID: 'new-session' })
+    assert.deepEqual(result, { content: 'Nothing to clear' })
+    await plugin.cleanup()
+    assert.ok(diagnosticAttempts > 0, 'the failing diagnostic sink must have been exercised')
+  })
+})
 
 describe('plugin.v2.js adapter conformance', () => {
   it('registers all four custom tools, each with options.codemode === false (D4)', async () => {
@@ -176,7 +305,7 @@ describe('plugin.v2.js adapter conformance', () => {
     // the reload would silently never fire on the real runtime. This test
     // fails if the handler's event-type filter regresses back to a made-up
     // type name.
-    const { emitEvent, getToolReloadCalls, ...rest } = await loadPluginWithMockContext()
+    const { emitEvent, getToolReloadCalls } = await loadPluginWithMockContext()
     assert.equal(getToolReloadCalls(), 0)
     emitEvent({ type: 'mcp.tools.changed' })
     // Allow the async iterator's microtask to run.
@@ -188,6 +317,7 @@ describe('plugin.v2.js adapter conformance', () => {
     assert.equal(getToolReloadCalls(), 1, 'unrelated event types must not trigger a reload')
   })
 
+  // spec: openspec/specs/workdir-injection/spec.md
   it('execute.before mutates event.input in place and uses "shell" (not "bash") as the always-eligible built-in', async () => {
     const { registeredHooks, getToolEditor } = await loadPluginWithMockContext()
     const editor = getToolEditor()
