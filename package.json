@@ -23,7 +23,7 @@
   },
   "devDependencies": {
     "zod": "^4.6.7",
-    "@opencode/plugin": "^2.1.4",
+    "@opencode/plugin": "^2.2.5",
     "@opencode/cli": "^2.2.5"
   }
 }
