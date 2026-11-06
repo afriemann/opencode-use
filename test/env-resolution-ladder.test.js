@@ -1,4 +1,4 @@
-// spec: openspec/changes/v2-plugin-migration/specs/workdir-injection/spec.md
+// spec: openspec/specs/workdir-injection/spec.md
 // (Requirement: Shell Environment Injection — V2 fail-closed env-resolution ladder, D6)
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'

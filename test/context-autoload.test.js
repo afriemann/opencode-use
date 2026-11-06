@@ -1,4 +1,4 @@
-// spec: openspec/changes/auto-load-repo-context/specs/context-autoload/spec.md
+// spec: openspec/specs/context-autoload/spec.md
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { exec } from 'node:child_process'

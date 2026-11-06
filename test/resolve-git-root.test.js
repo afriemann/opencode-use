@@ -1,4 +1,4 @@
-// spec: openspec/changes/fix-worktree-git-root-resolution/specs/worktree-git-root/spec.md
+// spec: openspec/specs/worktree-git-root/spec.md
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, rm } from 'node:fs/promises'

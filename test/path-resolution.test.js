@@ -1,4 +1,4 @@
-// spec: openspec/changes/fix-resolvepath-tilde-expansion/specs/path-resolution/spec.md
+// spec: openspec/specs/path-resolution/spec.md
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { homedir } from 'node:os'

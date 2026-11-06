@@ -1,4 +1,4 @@
-// spec: openspec/changes/direnv-automation/specs/worktree-envrc-trust/spec.md
+// spec: openspec/specs/worktree-envrc-trust/spec.md
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { writeFile, mkdir } from 'node:fs/promises'

@@ -1,5 +1,4 @@
-// spec: openspec/changes/fix-use-clear-worktree-prune/specs/worktree-cleanup/spec.md
-// spec: openspec/changes/persist-session-state-v2-storage/specs/worktree-cleanup/spec.md
+// spec: openspec/specs/worktree-cleanup/spec.md
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'

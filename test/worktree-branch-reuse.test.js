@@ -1,4 +1,4 @@
-// spec: openspec/changes/fix-worktree-branch-exists/specs/worktree-branch-reuse/spec.md
+// spec: openspec/specs/worktree-branch-reuse/spec.md
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { exec } from 'node:child_process'

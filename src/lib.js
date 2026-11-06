@@ -2,18 +2,9 @@
 // opencode-use internals
 // ---------------------------------------------------------------------------
 //
-// IMPORTANT: this file is deliberately NOT symlinked into
-// `~/.config/opencode/plugins/` (only `src/index.js` is). opencode's own
-// legacy-plugin loader (`getLegacyPlugins` in its plugin registry) invokes
-// EVERY top-level named export of a scanned plugin file that is a function
-// as an independent plugin factory, called as `server(input, load.options)`.
-// Any helper exported here for direct unit testing would be misinterpreted
-// as its own "plugin" and invoked with the wrong argument shape if this file
-// were ever placed where opencode scans it. Keep it here, and have
-// `src/index.js` import from it — `src/index.js` must export nothing but
-// `default`. See `test/plugin-export-surface.test.js` for the regression
-// guard and `openspec/changes/archive/*/fix-plugin-export-scan/proposal.md`
-// for the full incident writeup.
+// Keep shared helpers outside scanned plugin directories: the V1 loader
+// invokes named function exports as plugin factories. Only the default-only
+// adapters belong there; test/plugin-export-surface.test.js guards this invariant.
 
 import { dirname, join, relative, isAbsolute, resolve } from 'node:path'
 import { stat, readFile, realpath } from 'node:fs/promises'
