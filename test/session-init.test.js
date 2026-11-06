@@ -1,4 +1,4 @@
-// spec: openspec/changes/direnv-automation/specs/context-autoload/spec.md
+// spec: openspec/specs/context-autoload/spec.md
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'

@@ -1,5 +1,3 @@
-// spec: openspec/changes/fix-plugin-export-scan/proposal.md
-//
 // opencode's legacy-plugin loader (`getLegacyPlugins` in
 // packages/opencode/src/plugin/index.ts) invokes EVERY top-level named
 // export that is a function as an independent plugin factory, called as

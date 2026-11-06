@@ -1,4 +1,4 @@
-// spec: openspec/changes/persist-session-state-v2-storage/specs/worktree-ownership-persistence/spec.md
+// spec: openspec/specs/worktree-ownership-persistence/spec.md
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'

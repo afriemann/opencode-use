@@ -12,27 +12,32 @@ annotation and system-prompt injection.
 
 ### Requirement: System Prompt Session Context
 
-The plugin SHALL inject a system-prompt section, via the runtime's
-session-context hook (V1: `experimental.chat.system.transform`; V2:
-`ctx.session.hook("context", ...)`), describing the session's active
-working directory, active environment, and active worktree (when any of
-these are set), so the agent can construct correct absolute paths for tools
-that have no `workdir` parameter of their own (for example `read`, `write`,
-`edit`, `glob`, `grep`), and understands that any tool call which accepts a
-`workdir` parameter — not only the shell tool (named `bash` on V1, `shell`
-on V2) — receives it automatically.
+The plugin SHALL describe the session's active working directory, environment
+source and variable count, and active worktree through the runtime's
+session-context hook, so the agent can construct correct absolute paths for
+tools that have no `workdir` parameter of their own (for example `read`, `write`,
+`edit`, `glob`, `grep`), and understands that any tool call accepting `workdir`,
+not only the shell tool (`bash` on V1, `shell` on V2), receives it automatically.
+V1 SHALL retain system-prompt delivery through
+`experimental.chat.system.transform`, omitting the section when no context is
+active. V2 SHALL deliver complete replacement snapshots through
+`ctx.session.hook("context", ...)` messages, explicitly marking absent cwd,
+environment, worktree, and concurrency warning. A loaded environment exporting
+zero variables SHALL remain distinguishable from no loaded environment.
 
 #### Scenario: Session has active context to report
 
-- GIVEN a session with at least one of: an active working directory, active environment, or active worktree
-- WHEN the system prompt is being assembled
-- THEN the plugin injects a "## Active Session Context (opencode-use)" section listing the active values and instructing the agent to build absolute paths from them for tools with no `workdir` parameter
+- **GIVEN** a session with an active working directory, loaded environment, or active worktree
+- **WHEN** model context is assembled
+- **THEN** the plugin supplies an "Active Session Context (opencode-use)" section with current metadata and absolute-path/automatic-workdir guidance using the transport for that runtime
+- **AND** an environment source exporting zero variables is reported as loaded with count zero
 
 #### Scenario: Session has no active context to report
 
-- GIVEN a session with no active working directory, environment, or worktree
-- WHEN the system prompt is being assembled
-- THEN the plugin injects no session-context section
+- **GIVEN** a session with no active working directory, loaded environment, or worktree
+- **WHEN** model context is assembled
+- **THEN** V1 supplies no session-context section
+- **AND** V2's applicable snapshot explicitly reports absence rather than leaving earlier values applicable
 
 ### Requirement: Tool Workdir Injection
 
@@ -245,10 +250,9 @@ when the `sessionID` is known; when the invocation carries no `sessionID`,
 or an unrecognized one, the plugin SHALL NOT modify `output.env`.
 
 **V2 session resolution.** The `ShellCreateBefore` payload carries no
-`sessionID` — this information is not available to the plugin on V2, so the
-V1 resolution rule above cannot be applied as written. The plugin SHALL
-instead resolve which session's environment to inject using this
-fail-closed ladder, evaluated in order:
+`sessionID`, so the V1 resolution rule above cannot be applied as written.
+The plugin SHALL instead resolve which session's environment to inject using
+this fail-closed ladder, evaluated in order:
 
 1. If exactly one tracked session has a non-empty active environment, use
    that session's environment.
@@ -259,11 +263,12 @@ fail-closed ladder, evaluated in order:
 
 This ladder SHALL NEVER inject one session's environment into a shell
 invocation resolved (by rule 2) or attributable (by rule 1) to a different
-session — an ambiguous case SHALL always resolve to "inject nothing" (rule
-3), never to a guessed session. The V2 session-context system-prompt block
-SHALL state, when more than one session is concurrently tracked with a
-non-empty environment, that shell-environment injection is best-effort and
-may be suppressed in that situation.
+session; an ambiguous case SHALL always resolve to "inject nothing" (rule
+3), never to a guessed session. The applicable V2 context snapshot SHALL
+state, when more than one session is concurrently tracked with a non-empty
+environment, that shell-environment injection is best-effort and may be
+suppressed in that situation. Warning freshness follows Settled V2 Session
+Context.
 
 Only environment variable keys that are POSIX-portable identifiers
 (matching `[A-Za-z_][A-Za-z0-9_]*`) SHALL be injected; other keys are
@@ -335,4 +340,147 @@ by the failed operation.
 
 - **WHEN** the shell-environment hook encounters an internal error while applying a session's active environment
 - **THEN** the hook resolves without throwing or rejecting, and the error is logged
-</content>
+
+### Requirement: Cache-Stable V2 Context Delivery
+
+The plugin SHALL preserve its already-delivered V2 context messages at their
+original surviving transcript boundaries, adding a snapshot only when applicable
+context changes. Its system contribution SHALL be constant trust framing with no
+live session data. Structural prefix preservation is not a provider cache-hit or
+billing guarantee.
+
+#### Scenario: Unchanged tool loops preserve delivered context positions
+
+- **GIVEN** a V2 session whose context has already been delivered
+- **WHEN** additional unchanged-context tool continuations are assembled
+- **THEN** the system contribution remains identical and each existing snapshot appears once at its original boundary before the new continuation
+- **AND** no new snapshot is added
+
+#### Scenario: Context transitions append replacement snapshots
+
+- **GIVEN** an existing V2 transcript with delivered context
+- **WHEN** cwd, worktree, environment metadata, advisory selection, or warning changes
+- **THEN** one complete replacement snapshot is appended after the current host transcript
+- **AND** earlier surviving messages and snapshot positions remain unchanged
+
+### Requirement: Settled V2 Session Context
+
+The plugin SHALL derive V2 context at the hook's final settled snapshot after
+pending context mutations and host-location reconciliation, using the current
+env-bearing count across all tracked sessions. Reconciliation SHALL preserve
+explicit directory overrides when the host location has not changed. Transitions
+after that snapshot SHALL be reflected on the following request.
+
+#### Scenario: Other sessions change the environment concurrency warning
+
+- **GIVEN** the requesting session's own context is unchanged
+- **WHEN** another tracked session loads or clears a nonempty environment before the settled snapshot, including after native instruction preparation
+- **THEN** the next applicable snapshot adds or removes the concurrency warning according to the current count
+- **AND** the shell-environment resolution ladder remains unchanged
+
+#### Scenario: Pending discovery and delayed host moves settle coherently
+
+- **GIVEN** context discovery or a native host move is pending, or an explicit directory override is active
+- **WHEN** a V2 request is assembled, including a state transition during journal persistence
+- **THEN** the applicable snapshot contains one settled directory/advisory/environment selection rather than mixed discovery results
+- **AND** an unprocessed host move is reconciled without treating an unchanged host location as permission to overwrite the explicit override
+
+### Requirement: V2 Context Replay Lifecycle
+
+The plugin SHALL preserve eligible context replay across plugin restart/resume
+without restoring execution state from snapshots, and SHALL isolate each session's
+journal from other sessions and forks.
+
+#### Scenario: Plugin reload replays context without restoring execution state
+
+- **GIVEN** stored snapshots and surviving host history for a session
+- **WHEN** the plugin reloads and the session resumes
+- **THEN** eligible snapshots retain their bytes and boundaries
+- **AND** a replacement reflects current live state without restoring loaded environment values or worktree ownership from the journal
+
+#### Scenario: Forks do not inherit another session's journal
+
+- **GIVEN** a session with stored context snapshots
+- **WHEN** a fork assembles its context
+- **THEN** it starts its own context journal and receives its own current snapshot
+- **AND** neither session replays records belonging to the other
+
+### Requirement: V2 Context History Windows
+
+The plugin SHALL replay a snapshot only against its exact surviving host-prefix
+anchor and history generation. Unmatched records SHALL remain ineligible rather
+than being relocated; records belonging to potentially reversible history windows
+SHALL remain available for exact replay while that history survives.
+
+#### Scenario: Reversible history windows retain dormant snapshots
+
+- **GIVEN** context snapshots belonging to a host transcript
+- **WHEN** staged revert, textual compaction, native-window compaction, or model-dependent fallback changes the visible history window
+- **THEN** only exact eligible anchors are replayed, including protection for empty-prefix anchors across generations
+- **AND** returning to an eligible window restores its historical snapshot bytes and positions without making a retired snapshot the current context
+
+#### Scenario: Invalidated transcript suffixes never relocate snapshots
+
+- **GIVEN** snapshots anchored after a host prefix that is deleted or replaced
+- **WHEN** the surviving transcript is assembled, including after committed revert
+- **THEN** unmatched suffix snapshots are not replayed at similar-looking messages or at the tail
+- **AND** unaffected-prefix snapshots retain their positions and a current replacement is appended when needed
+
+### Requirement: V2 Context Journal Privacy
+
+The plugin SHALL retain only rendered context snapshots, prefix fingerprints, and
+minimal ordering/version/generation metadata for replayable host-session history.
+It SHALL NOT persist environment maps or values, host conversation text, raw
+requests, execution state, or errors in that journal. Clearing context withdraws
+current applicability rather than erasing already-transmitted history.
+
+#### Scenario: Persisted journal excludes execution and host conversation data
+
+- **GIVEN** a session containing environment values and host-message content not present in the approved context rendering
+- **WHEN** context is journaled and replayed
+- **THEN** storage contains only snapshots, fingerprints, and minimal structural metadata
+- **AND** neither environment values nor host-message excerpts are copied into journal records
+
+#### Scenario: Clearing context does not silently rewrite retained history
+
+- **GIVEN** previously delivered advisory and environment metadata
+- **WHEN** current context is cleared or a corrected advisory is selected
+- **THEN** historical copies remain immutable while their host history is replayable
+- **AND** the applicable replacement explicitly withdraws obsolete values and guidance
+
+### Requirement: V2 Context Journal Erasure
+
+The plugin SHALL remove journal and replay state after observed session deletion
+without recreation by its own queued work after cleanup completes. It SHALL
+recover orphan journals through authoritative existence reconciliation at startup,
+before replay, and periodically while loaded. Confirmed absence permits removal;
+indeterminate checks do not prove erasure. This is not globally atomic erasure
+across independent writers.
+
+#### Scenario: Session deletion drains pending writes before final erasure
+
+- **GIVEN** a session journal with pending rendering or persistence
+- **WHEN** session deletion is observed and cleanup completes
+- **THEN** journal records and in-memory replay state are removed
+- **AND** work queued under the deleted lifecycle cannot recreate them
+
+#### Scenario: Missed deletion events are reconciled authoritatively
+
+- **GIVEN** an orphan journal whose deletion event was missed
+- **WHEN** startup, pre-replay, or periodic reconciliation confirms that its host session does not exist
+- **THEN** the orphan is removed and not replayed
+- **AND** an API failure is not misclassified as confirmed absence
+
+### Requirement: V2 Context Delivery Failure
+
+The plugin SHALL prevent provider dispatch when safe journal reconstruction,
+persistence, or session existence cannot be established, reporting a sanitized
+failure rather than silently sending stale context, dropping warnings, changing
+system delivery, or logging sensitive prompts or environment values.
+
+#### Scenario: Unsafe context delivery fails before provider dispatch
+
+- **GIVEN** unreadable or invalid journal state, rejected persistence, storage exhaustion, or an indeterminate host-session check
+- **WHEN** a V2 request needs context delivery
+- **THEN** request preparation fails before provider dispatch with a sanitized diagnostic
+- **AND** no mutable-system fallback or incomplete-context request is sent

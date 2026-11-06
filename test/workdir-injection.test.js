@@ -1,7 +1,4 @@
 // spec: openspec/specs/workdir-injection/spec.md
-// (See also openspec/changes/fix-bash-workdir-injection-regression/ and
-// openspec/changes/fix-zod-schema-eligibility-detection/ for corrections to
-// this spec.)
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { z } from 'zod'
