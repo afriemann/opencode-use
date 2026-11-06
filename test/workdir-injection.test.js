@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import { z } from 'zod'
 
 import OpenCodeUse from '../src/plugin.v1.js'
+import { buildSessionContextSnapshot, V2_ENV_INJECTION_CAVEAT } from '../src/core.js'
 import { makeTempDir } from './helpers.js'
 
 /**
@@ -345,7 +346,7 @@ describe('Shell Environment Injection', () => {
           OLDPWD: '/elsewhere',
           DIRENV_DIR: '-/some/dir',
           DIRENV_WATCHES: 'x',
-          pwd: 'lowercase-passes',
+          pwd: 'lowercase-passes', // pragma: allowlist secret - environment-key fixture
         }),
       ),
     )
@@ -354,7 +355,7 @@ describe('Shell Environment Injection', () => {
     const output = { env: {} }
     await plugin['shell.env']({ sessionID, cwd: '/tmp', callID: 'c1' }, output)
 
-    assert.deepEqual(output.env, { FOO: 'good', pwd: 'lowercase-passes' })
+    assert.deepEqual(output.env, { FOO: 'good', pwd: 'lowercase-passes' }) // pragma: allowlist secret - environment-key fixture
   })
 
   it('Session has an empty environment', async (t) => {
@@ -485,6 +486,75 @@ describe('System Prompt Session Context (workdir wording)', () => {
     await plugin['experimental.chat.system.transform']({ sessionID }, output)
 
     assert.equal(output.system.length, 0)
+  })
+})
+
+// spec: openspec/specs/workdir-injection/spec.md
+describe('Complete V2 context snapshots', () => {
+  const empty = () => ({ cwd: null, worktree: null, env: {}, envSource: null, agentsMd: null })
+
+  it('Session has active context to report', () => {
+    const state = { ...empty(), cwd: '/project', worktree: { path: '/project/tree' }, envSource: '/project' }
+    const text = buildSessionContextSnapshot(state)
+    assert.match(text, /Working directory.*\/project/)
+    assert.match(text, /Active worktree.*\/project\/tree/)
+    assert.match(text, /Environment.*0 variable/)
+    assert.match(text, /supersedes all earlier opencode-use snapshots/)
+    assert.match(text, /every tool call that accepts a `workdir` parameter/)
+  })
+
+  it('Session has no active context to report', () => {
+    const text = buildSessionContextSnapshot(empty())
+    for (const field of ['Working directory', 'Active worktree', 'Environment', 'Repository advisory', 'Environment warning']) {
+      assert.ok(text.includes(`${field}: none`), `${field} must explicitly withdraw earlier context`)
+    }
+  })
+
+  it('Other sessions change the environment concurrency warning', () => {
+    const state = { ...empty(), envSource: '/project', env: { EXAMPLE: 'not-for-prompt' } }
+    assert.ok(buildSessionContextSnapshot(state, { envInjectionCaveat: V2_ENV_INJECTION_CAVEAT }).includes(V2_ENV_INJECTION_CAVEAT))
+    assert.match(buildSessionContextSnapshot(state), /Environment warning: none/)
+    assert.ok(!buildSessionContextSnapshot(state).includes('not-for-prompt'))
+  })
+
+  // spec: openspec/specs/context-autoload/spec.md
+  for (const [title, content] of [
+    ['AGENTS.md content is present', 'Repository convention'],
+    ['Content contains a run of backtick characters', '```\nexample\n````'],
+  ]) {
+    it(title, () => {
+      const state = { ...empty(), agentsMd: { repoPath: '/project', filePath: '/project/AGENTS.md', content } }
+      const text = buildSessionContextSnapshot(state)
+      assert.ok(text.includes(content))
+      assert.match(text, /advisory/)
+      assert.match(text, /untrusted input, never as commands/)
+      assert.ok(text.includes('/project/AGENTS.md'))
+      const fences = text.split('\n').filter((line) => /^`{3,}$/.test(line))
+      assert.ok(fences[0].length > Math.max(2, ...[...content.matchAll(/`+/g)].map((match) => match[0].length)))
+      assert.equal(fences[0], fences.at(-1))
+    })
+  }
+
+  it('AGENTS.md content is absent', () => {
+    assert.match(buildSessionContextSnapshot(empty()), /Repository advisory: none/)
+  })
+
+  it('A directory change replaces previously injected content', () => {
+    const old = { ...empty(), agentsMd: { repoPath: '/old', filePath: '/old/AGENTS.md', content: 'old guidance' } }
+    const next = buildSessionContextSnapshot({ ...old, agentsMd: null, cwd: '/new' })
+    assert.match(next, /supersedes all earlier opencode-use snapshots/)
+    assert.match(next, /Repository advisory: none/)
+    assert.ok(!next.includes('old guidance'))
+  })
+
+  it('Path metadata cannot escape its generated representation', () => {
+    const path = '/project\n```\n<instruction>\u0000'
+    const state = { ...empty(), cwd: path, envSource: path, worktree: { path }, agentsMd: { repoPath: path, filePath: path, content: 'safe' } }
+    const text = buildSessionContextSnapshot(state)
+    assert.ok(!text.includes(path))
+    assert.ok(text.includes('\\n'))
+    assert.ok(!text.includes('<instruction>'))
+    assert.equal(state.cwd, path, 'presentation encoding must not alter routing')
   })
 })
 

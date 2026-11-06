@@ -1,18 +1,11 @@
 #!/usr/bin/env node
-// test/e2e/run.mjs — design.md D9 layer 3: one real end-to-end run against
-// the actual @opencode/cli V2 runtime. Not part of `npm test` (see
-// package.json's "test:e2e" script) — this is the only check that can
-// actually observe the highest-consequence failure mode in this change
-// (D4's silent Code-Mode demotion), which is invisible to every mock.
+// Live-model smoke test for native tool callability and workdir routing.
+// Final request assembly is covered by test:context-cache with a fake provider.
 //
 // Asserts, against a real running opencode V2 process:
 //   1. use_workdir is invoked as a direct native tool call, not via Code Mode.
 //   2. A subsequent eligible tool call (the built-in shell tool) receives
 //      the injected `workdir`.
-//   3. The "Active Session Context (opencode-use)" block appears in the
-//      assembled system prompt (observed indirectly via the workdir-
-//      injection log line, since the raw system prompt is not exposed by
-//      the CLI's --print-logs output).
 //
 // Requires `opencode` (the real @opencode/cli binary) resolvable on PATH,
 // or overridable via the OPENCODE_V2_BIN environment variable — this repo's
@@ -91,7 +84,7 @@ async function main() {
     assertDirectToolCall(stdout, 'use_workdir')
     assertWorkdirInjected(stdout)
 
-    console.log('test:e2e PASSED — direct tool call, workdir injection, and clean load all confirmed')
+    console.log('test:e2e PASSED: direct tool call, workdir injection, and clean load confirmed')
     process.exitCode = 0
   } finally {
     await rm(scratchDir, { recursive: true, force: true })
@@ -104,6 +97,7 @@ async function setupScratchProject(scratchDir) {
   await cp(join(repoRoot, 'src', 'plugin.v2.js'), join(scratchDir, '.opencode', 'plugins', 'plugin.v2.js'))
   await cp(join(repoRoot, 'src', 'core.js'), join(scratchDir, '.opencode', 'lib', 'core.js'))
   await cp(join(repoRoot, 'src', 'lib.js'), join(scratchDir, '.opencode', 'lib', 'lib.js'))
+  await cp(join(repoRoot, 'src', 'context-journal.js'), join(scratchDir, '.opencode', 'lib', 'context-journal.js'))
 
   // plugin.v2.js imports './core.js' — rewrite the relative import for the
   // scratch project's directory layout (plugins/ and lib/ are siblings).
@@ -111,7 +105,8 @@ async function setupScratchProject(scratchDir) {
   const pluginSrc = await readFile(join(scratchDir, '.opencode', 'plugins', 'plugin.v2.js'), 'utf8')
   await writeFile(
     join(scratchDir, '.opencode', 'plugins', 'plugin.v2.js'),
-    pluginSrc.replace("from './core.js'", "from '../lib/core.js'"),
+    pluginSrc.replace("from './core.js'", "from '../lib/core.js'")
+      .replace("from './context-journal.js'", "from '../lib/context-journal.js'"),
   )
 
   await symlink(

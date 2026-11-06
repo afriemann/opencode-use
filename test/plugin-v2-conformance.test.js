@@ -16,13 +16,14 @@ import { makeFakeStorage, nodeShellShim, runGit } from './helpers.js'
  * shape) sufficient to drive src/plugin.v2.js's setup() and capture what it
  * registers, without a real @opencode/cli runtime.
  */
-function makeMockContext({ directory = '/tmp/mock-project', storage } = {}) {
+function makeMockContext({ directory = '/tmp/mock-project', storage = makeFakeStorage().storage } = {}) {
   const registeredHooks = { tool: {}, shell: {}, session: {} }
   const disposals = { tool: {}, shell: {}, session: {}, transform: false }
   let toolEditor
 
   const eventListeners = []
   let toolReloadCalls = 0
+  const locations = new Map()
 
   const ctx = {
     app: {},
@@ -49,6 +50,8 @@ function makeMockContext({ directory = '/tmp/mock-project', storage } = {}) {
       },
     },
     session: {
+      async get({ sessionID }) { return { location: locations.get(sessionID) ?? { directory } } },
+      async context() { return [] },
       async hook(name, callback) {
         registeredHooks.session[name] = callback
         return { dispose: mock.fn(async () => { disposals.session[name] = true }) }
@@ -103,6 +106,7 @@ function makeMockContext({ directory = '/tmp/mock-project', storage } = {}) {
     disposals,
     getToolEditor: () => toolEditor,
     emitEvent(event) {
+      if (event.type === 'session.created' || event.type === 'session.moved') locations.set(event.data.sessionID, event.data.location)
       const listener = eventListeners.shift()
       listener?.({ done: false, value: event })
     },
@@ -342,14 +346,150 @@ describe('plugin.v2.js adapter conformance', () => {
     assert.deepEqual(event.env, {})
   })
 
-  it('the session-context hook pushes {type: "text", ...} entries onto event.system', async () => {
-    const { registeredHooks } = await loadPluginWithMockContext()
+  // spec: openspec/specs/workdir-injection/spec.md
+  it('Unchanged tool loops preserve delivered context positions', async () => {
+    const { registeredHooks, cleanup } = await loadPluginWithMockContext()
     const hook = registeredHooks.session['context']
     assert.equal(typeof hook, 'function')
     const event = { sessionID: 'no-such-session', agent: 'test', system: [], messages: [], tools: [], options: {} }
     await hook(event)
-    // No tracked session -> no push, no throw.
-    assert.deepEqual(event.system, [])
+    assert.equal(event.system.length, 1, 'only a constant trust instruction belongs in the system contribution')
+    assert.equal(event.messages.length, 1, 'even absent context needs an explicit complete snapshot')
+    const first = structuredClone(event)
+    const continuation = { role: 'assistant', id: 'continued', content: [{ type: 'text', text: 'continue' }] }
+    const next = { ...event, system: [], messages: [continuation] }
+    await hook(next)
+    assert.deepEqual(next.system, first.system)
+    assert.deepEqual(next.messages, [...first.messages, continuation])
+    await cleanup()
+  })
+
+  // spec: openspec/specs/workdir-injection/spec.md
+  it('Other sessions change the environment concurrency warning', async () => {
+    const { makeFakeDirenvShell } = await import('./helpers.js')
+    const { storage } = makeFakeStorage()
+    const loaded = await loadPluginWithMockContext({ storage, shell: makeFakeDirenvShell({ exportJson: () => JSON.stringify({ EXAMPLE: 'private-value' }) }) })
+    const { registeredHooks, getToolEditor, cleanup } = loaded
+    const env = getToolEditor().get('use_direnv')
+    await env.execute({ path: '/synthetic' }, { sessionID: 'one' })
+    const render = async (messages = []) => {
+      const event = { sessionID: 'one', system: [], messages, tools: {}, options: {} }
+      await registeredHooks.session.context(event)
+      return event
+    }
+    const initial = await render()
+    assert.ok(!JSON.stringify(initial).includes('Best-effort on this runtime'))
+    const set = storage.set
+    let interrupted = false
+    storage.set = async (...args) => {
+      if (!interrupted && args[0].startsWith('context-journal/')) {
+        interrupted = true
+        await env.execute({ path: '/synthetic' }, { sessionID: 'two' })
+      }
+      await set(...args)
+    }
+    await env.execute({ path: '/other-source' }, { sessionID: 'one' })
+    const concurrent = await render([{ id: 'tool-loop', role: 'assistant', content: [{ type: 'text', text: 'continue' }] }])
+    assert.ok(JSON.stringify(concurrent.messages.at(-1)).includes('Best-effort on this runtime'), 'a change during persistence must reach this settled request')
+    assert.deepEqual(concurrent.system, initial.system)
+    assert.ok(!JSON.stringify(concurrent).includes('private-value'))
+    await getToolEditor().get('use_clear').execute({ fields: ['env'] }, { sessionID: 'two' })
+    const cleared = await render([{ id: 'after-clear', role: 'user', content: [{ type: 'text', text: 'continue' }] }])
+    assert.ok(!JSON.stringify(cleared.messages.at(-1)).includes('Best-effort on this runtime'))
+    await cleanup()
+  })
+
+  it('Pending discovery and delayed host moves settle coherently', async (t) => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'opencode-use-settled-'))
+    t.after(() => rm(tmpDir, { recursive: true, force: true }))
+    const { makeFakeDirenvShell } = await import('./helpers.js')
+    let releaseExport
+    let signalExport
+    const exporting = new Promise((resolve) => { signalExport = resolve })
+    const exported = new Promise((resolve) => { releaseExport = resolve })
+    const loaded = await loadPluginWithMockContext({ directory: '/missing-location', shell: makeFakeDirenvShell({ exportJson: () => { signalExport(); return exported } }) })
+    const { ctx, registeredHooks, getToolEditor, cleanup } = loaded
+    let location = { directory: '/missing-location' }
+    ctx.session.get = async () => ({ location })
+    const render = async () => {
+      const event = { sessionID: 'settled', system: [], messages: [], tools: {}, options: {} }
+      await registeredHooks.session.context(event)
+      return JSON.stringify(event.messages.at(-1) ?? null)
+    }
+    await render()
+    location = { directory: tmpDir }
+    assert.ok((await render()).includes(tmpDir), 'canonical move must be seen before its background event')
+    await getToolEditor().get('use_workdir').execute({ path: '/tmp' }, { sessionID: 'settled' })
+    assert.ok(!(await render()).includes(tmpDir), 'unchanged canonical location must preserve the explicit override')
+    const pending = getToolEditor().get('use_direnv').execute({ path: tmpDir }, { sessionID: 'settled' })
+    await exporting
+    let delivered = false
+    const request = render().then((snapshot) => { delivered = true; return snapshot })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(delivered, false, 'an unfinished export must prevent a mixed snapshot')
+    releaseExport('{}')
+    await pending
+    assert.ok((await request).includes('0 variable(s)'), 'a settled zero-variable environment must remain explicitly loaded')
+    await cleanup()
+  })
+
+  // spec: openspec/specs/workdir-injection/spec.md
+  it('Missed deletion events are reconciled authoritatively', async (t) => {
+    const { makeFakeDirenvShell } = await import('./helpers.js')
+    let sweep
+    const interval = globalThis.setInterval
+    t.mock.method(globalThis, 'setInterval', (callback, delay) => { sweep = callback; return interval(callback, delay) })
+    const { storage } = makeFakeStorage()
+    let removalStarted, releaseRemoval
+    const removing = new Promise((resolve) => { removalStarted = resolve })
+    const gate = new Promise((resolve) => { releaseRemoval = resolve })
+    const remove = storage.remove
+    storage.remove = async (key) => {
+      if (key.startsWith('worktree/')) { removalStarted(); await gate }
+      await remove(key)
+    }
+    const loaded = await loadPluginWithMockContext({ storage, shell: makeFakeDirenvShell({ exportJson: () => JSON.stringify({ EXAMPLE: 'fixture-private-value' }) }) })
+    t.after(loaded.cleanup)
+    await loaded.getToolEditor().get('use_direnv').execute({ path: '/synthetic' }, { sessionID: 'deleted' })
+    await loaded.registeredHooks.session.context({ sessionID: 'deleted', system: [], messages: [], tools: {}, options: {} })
+    loaded.ctx.session.get = async ({ sessionID }) => {
+      if (sessionID === 'deleted') throw { _tag: 'Session.NotFoundError' }
+      return { location: { directory: '/tmp/mock-project' } }
+    }
+    const reconciliation = sweep()
+    await removing
+    const shell = { cwd: '/tmp/mock-project', env: {} }
+    await loaded.registeredHooks.shell['create.before'](shell)
+    try {
+      assert.deepEqual(shell.env, {}, 'authoritatively deleted sessions must not remain eligible while ownership erasure waits')
+      const event = { sessionID: 'live', system: [], messages: [], tools: {}, options: {} }
+      await loaded.registeredHooks.session.context(event)
+      assert.ok(!JSON.stringify(event.messages.at(-1)).includes('Best-effort on this runtime'))
+    } finally {
+      releaseRemoval()
+      await reconciliation
+    }
+  })
+
+  // spec: openspec/specs/workdir-injection/spec.md
+  it('Unsafe context delivery fails before provider dispatch', async (t) => {
+    for (const failure of ['history', 'existence', 'snapshot']) {
+      const loaded = await loadPluginWithMockContext()
+      t.after(loaded.cleanup)
+      if (failure === 'history') loaded.ctx.session.context = async () => undefined
+      if (failure === 'existence') loaded.ctx.session.get = async () => { throw new Error('private API detail') }
+      const event = { sessionID: 'failed', system: [], messages: [], tools: {}, options: {} }
+      if (failure === 'snapshot') {
+        let reads = 0
+        loaded.ctx.session.get = async () => {
+          if (++reads > 1) throw new Error('private snapshot detail')
+          return { location: { directory: '/tmp/mock-project' } }
+        }
+      }
+      await assert.rejects(loaded.registeredHooks.session.context(event), /Context delivery failed/)
+      assert.deepEqual(event.messages, [])
+      assert.deepEqual(event.system, [])
+    }
   })
 
   it("setup()'s cleanup disposes ALL FOUR registrations (transform + 3 hooks) and aborts the event subscription", async () => {
@@ -368,7 +508,7 @@ describe('plugin.v2.js adapter conformance', () => {
 
     // The session.deleted branch shares the same event subscription (D9) —
     // an event emitted after disposal must not be processed by either branch.
-    emitEvent({ type: 'session.deleted', sessionID: 'still-there' })
+    emitEvent({ type: 'session.deleted', data: { sessionID: 'still-there' } })
     await new Promise((r) => setImmediate(r))
     assert.ok(backing.has('worktree/v1/still-there'), 'no event may be processed after the disposer runs')
   })
@@ -497,6 +637,7 @@ describe('plugin.v2.js adapter conformance', () => {
   })
 
   it('extends the mcp.tools.changed event loop with a session.deleted branch that removes exactly that session\'s storage key (design.md D9)', async () => {
+    for (const journalFailure of [false, true]) {
     const backing = new Map()
     backing.set('worktree/v1/session-a', {
       schema: 1, sessionID: 'session-a', path: '/tmp/a', branch: 'a', repoRoot: '/tmp/repo-a', owned: true, createdAt: new Date().toISOString(),
@@ -505,15 +646,21 @@ describe('plugin.v2.js adapter conformance', () => {
       schema: 1, sessionID: 'session-b', path: '/tmp/b', branch: 'b', repoRoot: '/tmp/repo-b', owned: true, createdAt: new Date().toISOString(),
     })
     const { storage } = makeFakeStorage(backing)
+    const remove = storage.remove
+    storage.remove = async (key) => {
+      if (journalFailure && key.startsWith('context-journal/')) throw new Error('synthetic journal erasure failure')
+      return remove(key)
+    }
+    const { emitEvent, cleanup } = await loadPluginWithMockContext({ storage })
 
-    const { emitEvent } = await loadPluginWithMockContext({ storage })
-
-    emitEvent({ type: 'session.deleted', sessionID: 'session-a' })
+    emitEvent({ type: 'session.deleted', data: { sessionID: 'session-a' } })
     await new Promise((r) => setImmediate(r))
     await new Promise((r) => setImmediate(r))
 
     assert.ok(!backing.has('worktree/v1/session-a'), 'the deleted session\'s key must be removed')
     assert.ok(backing.has('worktree/v1/session-b'), 'other sessions\' keys must be untouched')
+    await cleanup()
+    }
   })
 
   it('session deletion cleanup does not affect the worktree on disk (worktree-ownership-persistence spec)', async () => {
@@ -538,7 +685,7 @@ describe('plugin.v2.js adapter conformance', () => {
         assert.match(created.content, /^Worktree created at/)
         assert.ok(backing.has(`worktree/v1/${sessionID}`))
 
-        emitEvent({ type: 'session.deleted', sessionID })
+        emitEvent({ type: 'session.deleted', data: { sessionID } })
         await new Promise((r) => setImmediate(r))
         await new Promise((r) => setImmediate(r))
 
@@ -567,7 +714,7 @@ describe('plugin.v2.js adapter conformance', () => {
     const storage = {
       ...base,
       async remove(key) {
-        if (failNext) {
+        if (failNext && key.startsWith('worktree/')) {
           failNext = false
           throw new Error('simulated remove failure')
         }
@@ -577,16 +724,14 @@ describe('plugin.v2.js adapter conformance', () => {
 
     const { emitEvent } = await loadPluginWithMockContext({ storage })
 
-    emitEvent({ type: 'session.deleted', sessionID: 'session-a' })
+    emitEvent({ type: 'session.deleted', data: { sessionID: 'session-a' } })
     await new Promise((r) => setImmediate(r))
     await new Promise((r) => setImmediate(r))
-    // First removal failed -> key A survives.
     assert.ok(backing.has('worktree/v1/session-a'))
 
-    emitEvent({ type: 'session.deleted', sessionID: 'session-b' })
+    emitEvent({ type: 'session.deleted', data: { sessionID: 'session-b' } })
     await new Promise((r) => setImmediate(r))
     await new Promise((r) => setImmediate(r))
-    // The loop must still be alive and process the next event.
     assert.ok(!backing.has('worktree/v1/session-b'))
   })
 })
@@ -608,7 +753,7 @@ describe('plugin.v2.js — session.created / session.moved directory init (desig
     const hook = registeredHooks.session['context']
     const event = { sessionID, agent: 'test', system: [], messages: [], tools: [], options: {} }
     await hook(event)
-    return event.system.find((s) => s.text?.includes('Active Session Context'))?.text
+    return event.messages.at(-1)?.content.find((part) => part.text?.includes('Active Session Context'))?.text
   }
 
   it('Session start initializes cwd and AGENTS.md without loading env', async (t) => {
@@ -637,7 +782,7 @@ describe('plugin.v2.js — session.created / session.moved directory init (desig
         const hook = registeredHooks.session['context']
         const event = { sessionID, agent: 'test', system: [], messages: [], tools: [], options: {} }
         await hook(event)
-        return event.system.find((s) => s.text?.includes('v2 session created'))
+        return event.messages.at(-1)?.content.find((part) => part.text?.includes('v2 session created'))
       })()
       assert.ok(agentsBlock, 'expected AGENTS.md content to have been discovered')
     } finally {
@@ -698,7 +843,7 @@ describe('plugin.v2.js — session.created / session.moved directory init (desig
       await wait()
       block = await renderSessionBlock(registeredHooks, sessionID)
       assert.ok(block.includes(toDir), 'expected state.cwd to have moved to the new directory')
-      assert.ok(block.includes('variable(s) from direnv'), 'expected session.moved to auto-load the already-allowed .envrc')
+      assert.match(block, /variable\(s\) from .*direnv/, 'expected session.moved to auto-load the already-allowed .envrc')
     } finally {
       globalThis.Bun = previousBun
     }

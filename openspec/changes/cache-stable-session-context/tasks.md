@@ -1,0 +1,13 @@
+- [x] 1.1 Correct package test discovery, expose the request-capture command, and align package/lock V2 peer metadata with the proposal.
+- [x] 1.2 Red-to-green "Session has active context to report" and "Session has no active context to report" in the shared rendering and adapter tests.
+- [x] 1.3 Red-to-green "AGENTS.md content is present", "AGENTS.md content is absent", "Content contains a run of backtick characters", and "A directory change replaces previously injected content".
+- [x] 1.4 Red-to-green "User-message snapshots do not confer user authority" and "Path metadata cannot escape its generated representation" using the design's rendering separation.
+- [x] 1.5 Red-to-green "Unchanged tool loops preserve delivered context positions" and "Context transitions append replacement snapshots" using the design's anchored journal.
+- [x] 1.6 Red-to-green "Other sessions change the environment concurrency warning" and "Pending discovery and delayed host moves settle coherently" in the V2 coordinator.
+- [x] 1.7 Red-to-green "Plugin reload replays context without restoring execution state" and "Forks do not inherit another session's journal".
+- [x] 1.8 Red-to-green "Reversible history windows retain dormant snapshots" and "Invalidated transcript suffixes never relocate snapshots" using the design's history-generation decisions.
+- [x] 1.9 Red-to-green "Persisted journal excludes execution and host conversation data" and "Clearing context does not silently rewrite retained history".
+- [x] 1.10 Red-to-green "Session deletion drains pending writes before final erasure" and "Missed deletion events are reconciled authoritatively" using the design's serialized lifecycle.
+- [x] 1.11 Red-to-green "Unsafe context delivery fails before provider dispatch" using the design's rejection boundary.
+- [x] 1.12 Add pinned-CLI final-request capture for the delivery, settled-state, replay-lifecycle, history-window, clearing, and unchanged shell-routing scenarios above.
+- [x] 1.13 Update README.md and docs/v2-compat-audit.md with the proposal's compatibility boundary and the design's persistence/retention trade-offs.
