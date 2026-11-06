@@ -10,12 +10,13 @@
   },
   "engines": { "node": ">=22.5" },
   "scripts": {
-    "test": "node --check src/core.js && node --check src/plugin.v1.js && node --check src/plugin.v2.js && node --test=test/ && echo 'Syntax OK'",
-    "test:e2e": "node test/e2e/run.mjs"
+    "test": "node --check src/core.js && node --check src/context-journal.js && node --check src/plugin.v1.js && node --check src/plugin.v2.js && node --test test/*.test.js && echo 'Syntax OK'",
+    "test:e2e": "node test/e2e/run.mjs",
+    "test:context-cache": "node test/e2e/context-cache.mjs"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.15.0",
-    "@opencode/plugin": "^2.0.18"
+    "@opencode/plugin": "^2.2.5"
   },
   "peerDependenciesMeta": {
     "@opencode-ai/plugin": { "optional": true },

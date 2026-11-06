@@ -1,27 +1,14 @@
-# opencode V2 Compatibility — `opencode-use`
+# opencode V2 Compatibility - `opencode-use`
 
-**Status: real V2 support shipped** (`src/plugin.v2.js`), alongside the
-unchanged V1 implementation (`src/plugin.v1.js`). Both share the runtime-
-agnostic business logic in `src/core.js`. See `openspec/changes/archive/`
-(after archival) for the full proposal, design, and specs.
+V2 uses `src/plugin.v2.js` with `@opencode/plugin >= 2.2.5`; V1 uses
+`src/plugin.v1.js` with `@opencode-ai/plugin >= 1.15.0`. Both share tool and
+directory/environment logic in `src/core.js`.
 
-> ℹ️ **History note:** an earlier version of this document (dated
-> 2026-09-15) tested this plugin against `opencode-ai@dev` and concluded no
-> migration was needed. That target was **not actually V2** —
-> `opencode-ai` (all its dist-tags) is the V1 product's own prerelease
-> channel. The real V2 product is a separate npm package, `@opencode/cli`
-> (stable, currently v2.0.4), with its own plugin SDK `@opencode/plugin`
-> (`Plugin.define({ id, setup(ctx) })`). That prior audit's empirical
-> findings about `opencode-ai@dev` remain true but do not describe V2
-> compatibility. This document replaces it with the real V2 port's status
-> and findings.
+## Runtime entrypoints
 
-## What changed
-
-Both `plugin.v1.js` and `plugin.v2.js` are thin adapters over the same
-`core.js` — the same behavior (custom tools, workdir injection, shell-env
-injection, AGENTS.md auto-discovery, system-prompt context) now runs
-identically on both opencode generations:
+Custom tools, workdir routing, environment handling and advisory semantics
+are shared. V1 delivers live context in system blocks; V2 delivers anchored
+ordinary-user-message snapshots with constant system trust framing.
 
 | Consumer wants | Import |
 |---|---|
@@ -39,7 +26,7 @@ unaffected. Opting into V2 is an explicit `"./v2"` import.
 | `tool.definition` (workdir schema annotation) | same `transform`, `editor.update(...)`, re-run on `mcp.tools.changed` |
 | `tool.execute.before` | `ctx.tool.hook("execute.before", ...)` |
 | `shell.env` | `ctx.shell.hook("create.before", ...)` |
-| `experimental.chat.system.transform` | `ctx.session.hook("context", ...)` |
+| `experimental.chat.system.transform` | `ctx.session.hook("context", ...)`: constant system framing and chronological message replay |
 
 ## Required tool option: `options: { codemode: false }`
 
@@ -98,10 +85,10 @@ shell call — an ambiguous case always resolves to "inject nothing," never a
 guess. **Practical impact:** if you run multiple concurrent opencode
 sessions on V2, each with a different `use_direnv`-loaded environment, and
 their working directories don't disambiguate them, environment injection may
-be silently skipped for some shell calls. The system prompt's "Active
-Session Context" block states this caveat in-band when more than one
-session is concurrently tracked with an environment, so the agent is aware
-injection may not have happened.
+be skipped for some shell calls. The applicable V2 snapshot states the
+caveat when the requesting session has a loaded environment and more than
+one tracked session has a nonempty environment. Another session loading or
+clearing its environment updates this warning at the next settled hook.
 
 This does not affect V1 at all — V1's `shell.env` hook still receives a
 real `sessionID` and injects deterministically.
@@ -111,18 +98,44 @@ real `sessionID` and injects deterministically.
 `src/core.js` holds everything runtime-agnostic: session state, the four
 tools' business logic (`executeUseWorkdir`, `executeUseDirenv`,
 `executeUseWorktree`, `executeUseClear`), the workdir-eligibility JSON-Schema
-predicate, the env-key filter, and the system-prompt block builders.
+predicate, the env-key filter, and the context renderers.
 `plugin.v1.js` and `plugin.v2.js` are thin adapters that wire each host's
 hook surface onto this shared core and inject host-specific dependencies
 (`$`, a log sink, the base directory).
 
-This structure exists because two independent full-copy entrypoints drift:
-an earlier work-in-progress `plugin.v2.js` (written before this
-architecture) had already silently dropped three spec'd behaviors after a
-single commit (the AGENTS.md advisory block, `use_clear`'s cascading
-cleanup, and a diagnostic log field) — proof that "the same specs hold on
-both runtimes" cannot be an informal expectation on two hand-maintained
-copies; it needs a structure that makes it true by construction.
+`src/context-journal.js` owns V2 replay and persistence. Records retain exact
+snapshot bytes, whole-host-prefix fingerprints and minimal ordering/window
+metadata. Unchanged tool loops replay each applicable record once at its
+original boundary. Changes append complete replacements, including absence
+and advisory withdrawal. Pending mutations settle before rendering; canonical
+host moves do not overwrite intentional tool cwd overrides.
+
+### Persistence and failure boundary
+
+Rendered cwd/worktree paths, advisory text and environment source/count can
+be confidential. The journal stores these for replay, not environment values,
+execution state, host-message excerpts or raw requests. Fingerprints are
+internal identifiers, not anonymized conversation data. Reload hydrates replay
+records separately from fresh execution state.
+
+Missing anchors remain dormant through reversible history windows. Replayed
+records never move to similar-looking messages or the current tail. Historical
+copies can survive file correction while retained host history remains
+replayable. `use_clear` withdraws current applicability without rewriting that
+history; journal deletion cannot recall provider-held content. Exact replay
+precludes arbitrary TTL or rolling eviction of already-sent snapshots.
+
+Deletion drains in-process journal writes before final removal. Journal-only
+startup and periodic sweeps, plus pre-replay/write checks, erase confirmed
+orphan records. Indeterminate existence checks authorize neither replay nor
+new writes. Host KV has no session cascade or compare-and-set; cross-process
+atomic erasure is not promised. Unreadable/invalid journals, storage exhaustion
+and rejected writes abort the awaited context hook with sanitized diagnostics,
+never fall back to mutable system text or stale/incomplete snapshots.
+
+Freshness ends at the context hook's final settled snapshot, not physical
+network send. Prefix stability is structural evidence only; provider cache
+hits and billing improvements require separate measurement.
 
 ## Other V2-specific facts
 
@@ -143,6 +156,13 @@ copies; it needs a structure that makes it true by construction.
   re-entrancy.
 
 ## Verification
+
+`npm run test:context-cache` uses the locked 2.2.5 CLI and an isolated local
+fake provider. It captures final primary HTTP request bodies in memory,
+without prompt/environment logging or real model credentials. It exercises
+native tool loops, context/advisory changes and clearing, other-session
+environment warnings, restart, textual/native-window compaction, and revert.
+Auxiliary request kinds do not consume the primary-response fixture.
 
 - **Correction:** the original plan called for re-pointing the five
   existing spec-suite test files directly at `core.js` (via injected
@@ -193,7 +213,7 @@ V1's own prerelease channel and will presumably keep running V1-shape
 plugins for as long as that channel exists; it says nothing about the real
 V2 product's compatibility.
 
-## Addendum (2026-09-17): architectural-suitability review — KEEP AS-IS
+## Native worktree capability assessment (V2 2.0.6)
 
 A later review (separate from the port work above) re-examined this
 plugin's V2 design against opencode V2's real native capabilities, to check
@@ -235,6 +255,6 @@ A sweep of the remaining native domains (`ctx.storage`, `ctx.command`,
 worktree-contamination guard were reconfirmed as genuinely plugin-unique,
 irreplaceable functionality.
 
-**Conclusion: KEEP AS-IS.** No change to `src/core.js`, `src/lib.js`,
-`src/plugin.v1.js`, or `src/plugin.v2.js` — the plugin's existing
-architecture stands confirmed correct for V2.
+Named-branch workspaces and directory-scoped environment handling remain
+plugin responsibilities. Model-context delivery follows the current contract
+and verification method described above.

@@ -612,6 +612,33 @@ export const V2_ENV_INJECTION_CAVEAT =
   'Best-effort on this runtime: if multiple concurrent sessions hold an active environment, ' +
   'injection may be suppressed for this session\'s shell calls rather than risk applying the wrong one.'
 
+export function buildSessionContextSnapshot(state, options = {}) {
+  const encodePath = (value) => JSON.stringify(value).replace(/[<>&`]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+  const presented = {
+    ...state,
+    cwd: state.cwd ? encodePath(state.cwd) : null,
+    envSource: state.envSource ? encodePath(state.envSource) : null,
+    worktree: state.worktree ? { path: encodePath(state.worktree.path) } : null,
+    agentsMd: state.agentsMd ? {
+      ...state.agentsMd,
+      repoPath: encodePath(state.agentsMd.repoPath),
+      filePath: encodePath(state.agentsMd.filePath),
+    } : null,
+  }
+  return [
+    '## Session Context Snapshot (opencode-use)',
+    'This complete snapshot supersedes all earlier opencode-use snapshots. Only its selected repository advisory applies now; earlier selections are historical and no longer apply.',
+    'Plugin-generated metadata, not a human-authored request. Quoted paths use JSON string escaping; decode them only when constructing a path.',
+    !state.cwd && 'Working directory: none (no session override)',
+    !state.worktree && 'Active worktree: none',
+    !state.envSource && 'Environment: none (no loaded session environment)',
+    `Environment warning: ${state.envSource && options.envInjectionCaveat ? options.envInjectionCaveat : 'none'}`,
+    buildActiveSessionContextBlock(presented),
+    state.agentsMd ? buildAgentsMdBlock(presented) : 'Repository advisory: none. All earlier repository advisories are withdrawn.',
+  ].filter(Boolean).join('\n\n')
+}
+
 // ---------------------------------------------------------------------------
 // Tool descriptions (shared text; schema shape is built per-adapter)
 // ---------------------------------------------------------------------------

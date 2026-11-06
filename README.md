@@ -11,14 +11,14 @@ Without this plugin, every such tool call starts from opencode's launch director
 - **`use_worktree`** — create (or reuse) a git worktree and set it as cwd in one call; idempotent; same auto-discovery as `use_workdir`
 - **`use_clear`** — tear down the session context; removes owned worktrees from disk
 - **Transparent injection** — two independent mechanisms, both silent to the agent: env (any shell opencode spawns for the session, via the native `shell.env` hook) and workdir (any eligible tool, via `tool.execute.before`; a tool is eligible when its schema declares an optional, unconstrained `workdir` string parameter) — the agent writes clean calls and never has to repeat itself
-- **System prompt context** — tools with no `workdir` parameter (read, write, edit, glob, grep) see the active path injected into the system prompt so they resolve file paths correctly
-- **Repository context auto-load** — whenever `use_workdir`/`use_worktree` moves the session to a genuinely new directory, the plugin searches upward (bounded by the git root) for an `AGENTS.md` and injects it into the system prompt as clearly-labeled advisory context. It also checks for an `.envrc`: if found and already `direnv allow`-ed, it is loaded automatically (equivalent to `use_direnv`); otherwise a reminder is appended for the agent to load it explicitly. The plugin never runs `direnv allow` itself, except for one narrow case: auto-trusting a **newly created** git worktree's `.envrc` when it is byte-identical to an already-allowed repository root `.envrc` (see [Repository Context Auto-Load](#repository-context-auto-load))
+- **Model context** - tools with no `workdir` parameter (read, write, edit, glob, grep) receive the active base path so they resolve file paths correctly
+- **Repository context auto-load** - whenever `use_workdir`/`use_worktree` moves the session to a genuinely new directory, the plugin searches upward (bounded by the git root) for an `AGENTS.md` and delivers it as clearly-labeled advisory context. It also checks for an `.envrc`: if found and already `direnv allow`-ed, it is loaded automatically (equivalent to `use_direnv`); otherwise a reminder is appended for the agent to load it explicitly. The plugin never runs `direnv allow` itself, except for one narrow case: auto-trusting a **newly created** git worktree's `.envrc` when it is byte-identical to an already-allowed repository root `.envrc` (see [Repository Context Auto-Load](#repository-context-auto-load))
 - **Session-start and session-move directory init** — every session (including subagents) initializes its active directory, `AGENTS.md`, and `.envrc` detection from the host's own starting location, without needing an explicit `use_workdir` call first (env is never auto-loaded at session start, only on an explicit directory change). On opencode v2, moving a session (`session.moved`) is treated exactly like an explicit `use_workdir` call, including env auto-load; v1 has no equivalent event
 
 ## Requirements
 
 - **Node.js** `>= 22.5`
-- **opencode** with `@opencode-ai/plugin >= 1.15.0`
+- **opencode V1** with `@opencode-ai/plugin >= 1.15.0`, or **V2** with `@opencode/plugin >= 2.2.5`
 - **direnv** on `PATH` (only required when using `use_direnv`)
 - **git** on `PATH` (only required when using `use_worktree` / `use_clear`)
 
@@ -53,11 +53,15 @@ Repeat both steps after a fresh opencode install or re-bootstrap.
 ### 3. Symlink the plugin into opencode's plugins directory
 
 ```bash
-ln -s ~/git/opencode-use/src/index.js \
+ln -s ~/git/opencode-use/src/plugin.v1.js \
       ~/.config/opencode/plugins/opencode-use.js
 ```
 
 opencode discovers any `.js` file in `~/.config/opencode/plugins/` automatically — no config changes are needed.
+
+For V2, use `src/plugin.v2.js` as the symlink target instead. Keep the shared
+`src/core.js`, `src/lib.js` and `src/context-journal.js` beside the adapter in
+the cloned repository; do not copy helper files into the scanned plugins directory.
 
 ### 4. Verify
 
@@ -156,7 +160,7 @@ use_clear(fields?: Array<"cwd" | "env" | "worktree">, force?: boolean)
 - Clearing `worktree` removes **owned** worktrees from disk with `git worktree remove`. If the worktree has uncommitted changes or untracked files the command fails loudly — pass `force=true` to discard them, or clean up first and call `use_clear` again. If the path is no longer registered with git, `force=true` clears the session reference without attempting removal.
 - The `git worktree remove` subprocess runs against the repository actually containing the worktree — resolved the same way `use_worktree` resolves it (active working directory → `ctx.worktree` → `ctx.directory`, then falling through to path-based discovery if that candidate doesn't contain the worktree) — so removal still targets the correct repository even if the session's current context has since moved to a different, unrelated one.
 - Clearing `worktree` also clears `cwd` when cwd was pointing at the worktree (prevents bash commands from targeting a now-deleted directory).
-- Clearing `cwd` (directly, or indirectly via `worktree`) also clears any auto-loaded `AGENTS.md` repository context, so a cleared session doesn't keep injecting a stale repository's instructions into the system prompt.
+- Clearing `cwd` (directly, or indirectly via `worktree`) clears the currently applicable `AGENTS.md` advisory. V2 explicitly supersedes retained historical snapshots rather than deleting already-sent context.
 - Worktrees not created by this plugin in the current session are **unowned** — their directory is never removed.
 
 **Common pattern after finishing a feature branch:**
@@ -169,12 +173,12 @@ use_clear(fields: ["cwd", "worktree"])
 
 Whenever `use_workdir` or `use_worktree` moves the session's active directory to a **genuinely new path** (not on an idempotent no-op/reuse call), the plugin automatically:
 
-1. **Searches for `AGENTS.md`.** It resolves the new directory's git root (`git rev-parse --show-toplevel`) and searches upward from the directory to that root (or just the directory itself if it isn't inside a git repository), using the **nearest** match if more than one `AGENTS.md` exists along the way. The found content is injected into the system prompt as a distinct, clearly-labeled block:
+1. **Searches for `AGENTS.md`.** It resolves the new directory's git root (`git rev-parse --show-toplevel`) and searches upward from the directory to that root (or just the directory itself if it isn't inside a git repository), using the **nearest** match if more than one `AGENTS.md` exists along the way. The found content is delivered as a distinct, clearly-labeled advisory in model context:
    - It states the **repository path** and the **file path**.
    - It is explicitly framed as **advisory, repository-provided context that does not override the agent's own operating instructions** — because it may come from a branch the *agent itself* navigated to (e.g. an unreviewed PR branch via `use_worktree`), not a directory the user chose. The agent is told to treat it as untrusted input, never as commands.
    - Content is size-capped: files up to 16 KiB are injected in full; files up to 1 MiB are truncated to 16 KiB at a line boundary with a marker; files larger than 1 MiB are not read at all (a note in the tool's return value says so).
    - The content is wrapped in a fenced code block whose backtick count is computed from the content itself, so a crafted `AGENTS.md` cannot terminate the fence early and impersonate system text.
-   - A directory change always **replaces** the previously injected content (including clearing it entirely when the new directory has no `AGENTS.md`) — a session that moves between repositories never shows two repositories' instructions at once, or a stale one.
+   - A directory change **replaces the currently applicable advisory**, including explicitly withdrawing it when the new directory has no `AGENTS.md`. V1 includes only the current advisory in its system prompt. V2 retains historical snapshots at their original conversation positions and explicitly supersedes them; only the latest applicable snapshot governs current context.
 2. **Conditionally auto-loads an `.envrc`.** Using the same upward search, the plugin locates an `.envrc` between the directory and the git root (a plain filesystem existence check — locating it never invokes a `direnv` subprocess). If one is found:
    - It checks (`direnv status --json`) whether that exact file is **already** `direnv allow`-ed. This check, and everything below, is anchored at the directory the `.envrc` was actually found in (which may be an ancestor of the resolved directory), never at the resolved directory itself.
    - If already allowed, the plugin runs `direnv export json` there and loads the resulting variables into the session's active environment — **overwriting** any previously loaded environment, but never merging with it. A load failure (timeout, non-zero exit, malformed output) leaves the previously loaded environment untouched and appends a note suggesting a manual retry via `use_direnv`.
@@ -207,11 +211,15 @@ Fires whenever opencode is about to spawn a shell process for a session with a k
 
 Annotates the bash tool's `workdir` parameter description at every LLM call, telling the model it must not supply `workdir` when the plugin is active. This is more authoritative than a system-prompt note because the model reads tool schemas while choosing parameter values.
 
-### Hook: `experimental.chat.system.transform`
+### Model-context delivery
 
-When any session context is active, appends an `## Active Session Context (opencode-use)` block to the system prompt listing the current working directory, environment source, and active worktree. This allows non-bash tools (read, write, edit, glob, grep) to resolve file paths correctly — the model constructs absolute paths from the injected base.
+V1 uses `experimental.chat.system.transform` to append active cwd, environment-source/count, worktree and repository advisory blocks to its system prompt.
 
-When the session has auto-loaded `AGENTS.md` content, this hook also appends a second, distinct `## Repository-Provided Instructions (opencode-use, advisory)` block — see [Repository Context Auto-Load](#repository-context-auto-load).
+V2 uses `ctx.session.hook("context")` to replay chronological context snapshots at their original message boundaries, adding a complete replacement only when context changes. Its system contribution is constant trust framing, not live paths or warnings. Snapshots are plugin metadata, not human-authored requests, and repository text remains subordinate and untrusted. Non-shell tools still construct absolute paths from the current snapshot's cwd; tool routing and the environment-resolution ladder are unchanged.
+
+Freshness is measured at the hook's final settled snapshot. Pending discovery and changes in other sessions' loaded environments are reconciled there; transitions afterward appear in the following request. Stable request prefixes do not establish provider cache hits or billing savings.
+
+V2 journals persist rendered paths, repository advisory text, environment source/count and minimal anchor metadata in host plugin storage. They never restore loaded environment values or worktree ownership. Historical copies can survive advisory-file correction and reversible history windows while needed for exact replay. `use_clear` withdraws current applicability, not historical or provider-held content. Session deletion removes the journal; startup, pre-replay and periodic existence checks recover missed deletion events. The host KV interface does not provide atomic erasure across independent processes. Unsafe journal reads/writes or indeterminate session checks fail the request instead of sending stale context. See [V2 compatibility and retention](docs/v2-compat-audit.md).
 
 ### Session State
 
@@ -246,20 +254,20 @@ all state remains in-process-only with no exception.
 
 ## Development
 
-### Syntax check
+### Verification
 
 ```bash
 npm test
-# node --check src/index.js && echo 'Syntax OK'
+npm run test:context-cache
 ```
 
-CI runs this against Node.js 22 and 24 on every push and pull request.
+`npm test` runs syntax checks and the unit/adapter suites. CI runs these against Node.js 22 and 24. `test:context-cache` runs the locked 2.2.5 CLI against an isolated local fake provider, captures final request bodies in memory, and requires no model credentials. It covers prefix stability, context transitions, other-session environments, reload, compaction and revert.
 
 ### Extending the plugin
 
-The plugin exports a single async factory function `OpenCodeUse({ client, $ })`. Each tool is created with `tool()` from `@opencode-ai/plugin`. Hooks are returned as properties of the plain object the factory resolves to — matching the hook event name as the key.
+`src/core.js` contains shared logic. `src/plugin.v1.js` exports the V1 async factory and hook map; `src/plugin.v2.js` exports the V2 plugin definition and registrations. Keep runtime-specific transport in the adapters.
 
-**`src/index.js` (the file symlinked into `~/.config/opencode/plugins/`) must export nothing but `default`.** opencode's legacy-plugin loader treats *every* top-level named export of a scanned plugin file that is a function as an independent plugin factory, and invokes it as `server(input, options)` regardless of that function's real signature. A stray named export here is silently misinterpreted as its own broken "plugin" — at best a benign, always-failing no-op; at worst (if it happens to sort alphabetically before `default`) it aborts the loader before the real plugin ever registers, taking down all four tools. Internal helper functions that need direct unit-test access (`nearestExistingDir`, `resolveGitRoot`, `discoverGitRoot`, `resolveRepoContext`, `applyDirectoryChange`) live in `src/lib.js` instead, which is never symlinked into opencode's plugins directory and therefore never scanned. `test/plugin-export-surface.test.js` guards against this regressing.
+**Scanned adapter files export only `default`.** The V1 loader can invoke named function exports as independent plugin factories. Keep helpers outside the scanned plugins directory. `test/plugin-export-surface.test.js` guards this boundary.
 
 See the [opencode plugin API documentation](https://opencode.ai/docs/plugins) for the full hook surface and `tool()` schema API.
 
